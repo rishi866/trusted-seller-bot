@@ -1555,6 +1555,9 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok = await set_verified(target_user_id, admin.id)
         if ok:
             await _set_member_title(context.bot, target_user_id, "Trusted Seller")
+            member = await get_member(target_user_id) or {}
+            uname  = member.get("username") or member.get("full_name") or str(target_user_id)
+            uname_display = f"@{uname}" if member.get("username") else uname
             try:
                 await context.bot.send_message(
                     chat_id=target_user_id,
@@ -1563,7 +1566,7 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 await context.bot.send_message(
                     chat_id=GROUP_ID,
-                    text=decorate("🎊 A new <b>Verified Seller</b> has joined the community! ✅"),
+                    text=decorate(f"🎊 <b>{h(uname_display)}</b> is now a <b>Verified Seller</b>! ✅\nWelcome to the trusted community!"),
                     parse_mode="HTML",
                 )
             except TelegramError:
