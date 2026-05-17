@@ -593,6 +593,46 @@ async def set_verified(user_id: int, admin_id: int) -> bool:
         return False
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CUSTOM EMOJIS
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def get_custom_emojis() -> list:
+    def _get():
+        res = get_supabase().table("custom_emojis").select("*").execute()
+        return res.data or []
+    try:
+        return await asyncio.to_thread(_get)
+    except Exception as e:
+        logger.error(f"get_custom_emojis error: {e}")
+        return []
+
+
+async def save_custom_emoji(fallback: str, custom_id: str, keyword: str = "") -> bool:
+    def _save():
+        get_supabase().table("custom_emojis").upsert(
+            {"fallback": fallback, "custom_id": custom_id, "keyword": keyword or ""},
+            on_conflict="fallback",
+        ).execute()
+        return True
+    try:
+        return await asyncio.to_thread(_save)
+    except Exception as e:
+        logger.error(f"save_custom_emoji error: {e}")
+        return False
+
+
+async def delete_custom_emoji(fallback: str) -> bool:
+    def _del():
+        get_supabase().table("custom_emojis").delete().eq("fallback", fallback).execute()
+        return True
+    try:
+        return await asyncio.to_thread(_del)
+    except Exception as e:
+        logger.error(f"delete_custom_emoji error: {e}")
+        return False
+
+
 async def get_verified_sellers() -> list:
     def _get():
         res = get_supabase().table("members").select("user_id, username, full_name, avg_rating, total_deals, badge").eq("is_verified", True).execute()

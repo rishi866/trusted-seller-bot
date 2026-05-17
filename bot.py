@@ -90,6 +90,8 @@ from keyboards import (
     deal_actions_kb,
     admin_panel_kb,
 )
+import emoji_fx
+from emoji_fx import decorate, h
 
 logger = logging.getLogger(__name__)
 
@@ -192,17 +194,17 @@ async def post_seller_card(bot, seller_id: int, chat_id: int):
     username = member.get("username") or "N/A"
     full_name = member.get("full_name") or username
 
-    text = (
+    text = decorate(
         "╔════════════════════════╗\n"
-        "🏪 *SELLER SPOTLIGHT*\n"
+        "🏪 <b>SELLER SPOTLIGHT</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 Name: {full_name}\n"
-        f"🔗 Username: @{username}\n"
+        f"👤 Name: {h(full_name)}\n"
+        f"🔗 Username: @{h(username)}\n"
         f"⏱️ Avg Response: {rt} mins\n"
         f"📦 Total Deals: {deals}\n"
         f"⭐ Rating: {avg}/5 ({count} reviews)\n"
         f"✅ Verified: {verified}\n"
-        f"🏆 Badge: {badge}\n"
+        f"🏆 Badge: {h(badge)}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"👍 Trust Votes: {trust}\n"
         "╚════════════════════════╝"
@@ -211,7 +213,7 @@ async def post_seller_card(bot, seller_id: int, chat_id: int):
         await bot.send_message(
             chat_id=chat_id,
             text=text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=trust_profile_kb(seller_id),
         )
     except TelegramError as e:
@@ -525,6 +527,54 @@ async def refresh_scam_words_job(context: ContextTypes.DEFAULT_TYPE):
     words = await get_scam_words()
     context.bot_data["scam_words_cache"] = words
     logger.info(f"Scam words refreshed: {len(words)} words")
+    # Also reload emoji on every refresh cycle
+    await emoji_fx.load()
+
+
+# ── Emoji Capture ─────────────────────────────────────────────────────────────
+
+async def emoji_capture_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Capture custom animated emoji IDs from admin's message."""
+    user = update.effective_user
+    if context.bot_data.get("emoji_capture_admin") != user.id:
+        return  # not in capture mode for this user
+
+    msg      = update.effective_message
+    entities = list(msg.entities or []) + list(msg.caption_entities or [])
+    text     = msg.text or msg.caption or ""
+
+    custom_ents = [e for e in entities if e.type == "custom_emoji"]
+    if not custom_ents:
+        await msg.reply_text(
+            "❌ No custom emoji found!\n\nSend a message that contains animated/custom emoji.",
+            reply_markup=admin_panel_kb(),
+        )
+        return
+
+    from db import save_custom_emoji
+    saved = 0
+    details = []
+    for ent in custom_ents:
+        fallback  = text[ent.offset: ent.offset + ent.length]
+        custom_id = ent.custom_emoji_id
+        keyword   = emoji_fx.KEYWORD_HINTS.get(fallback, "")
+        ok = await save_custom_emoji(fallback, custom_id, keyword)
+        if ok:
+            saved += 1
+            kw_tag = f" ({keyword})" if keyword else ""
+            details.append(f"{fallback}{kw_tag}")
+
+    await emoji_fx.reload()
+    context.bot_data.pop("emoji_capture_admin", None)
+
+    detail_str = "  ".join(details) if details else "none"
+    await msg.reply_text(
+        f"✅ <b>Captured {saved} custom emoji!</b>\n\n"
+        f"Saved: {detail_str}\n\n"
+        "They will now appear animated in bot messages. ✨",
+        parse_mode="HTML",
+        reply_markup=admin_panel_kb(),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -559,11 +609,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     is_adm = await is_admin(user.id, context)
+    text = decorate(
+        f"👋 <b>Welcome {h(user.first_name)}!</b>\n\n"
+        "🎉 Welcome to the <b>AI Tools Buy/Sell</b> community!\n\n"
+        "✨ Tap a button below to get started 👇"
+    )
     await update.effective_chat.send_message(
-        f"👋 *Welcome {user.first_name}!*\n\n"
-        "Welcome to the *AI Tools Buy/Sell* community! 🎉\n\n"
-        "Tap a button below to get started 👇",
-        parse_mode="Markdown",
+        text,
+        parse_mode="HTML",
         reply_markup=main_menu(is_adm),
     )
 
@@ -768,24 +821,24 @@ async def _finalize_sell(update, context, user, file_id):
     date_str     = datetime.now(IST).strftime("%d %b %Y")
     uname_str    = f"@{user.username}" if user.username else user.full_name
 
-    card = (
-        "🔥 *NEW LISTING — SELL*\n"
+    card = decorate(
+        "🔥 <b>NEW LISTING — SELL</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🛒 Tool: {tool_name}\n"
-        f"💰 Price: ₹{price}\n"
-        f"📝 {description}\n"
+        f"🛒 Tool: {h(tool_name)}\n"
+        f"💰 Price: ₹{h(price)}\n"
+        f"📝 {h(description)}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 Seller: {uname_str} {verified_tag}\n"
+        f"👤 Seller: {h(uname_str)} {verified_tag}\n"
         f"📅 Posted: {date_str}\n"
         f"🆔 Listing ID: #{listing['id']}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "DM the seller to start a deal! 🤝"
+        "🤝 DM the seller to start a deal!"
     )
     try:
         if file_id:
-            await context.bot.send_photo(chat_id=GROUP_ID, photo=file_id, caption=card, parse_mode="Markdown")
+            await context.bot.send_photo(chat_id=GROUP_ID, photo=file_id, caption=card, parse_mode="HTML")
         else:
-            await context.bot.send_message(chat_id=GROUP_ID, text=card, parse_mode="Markdown")
+            await context.bot.send_message(chat_id=GROUP_ID, text=card, parse_mode="HTML")
         await update.message.reply_text(
             f"✅ Listing posted! ID: #{listing['id']}",
             reply_markup=back_home(),
@@ -866,21 +919,21 @@ async def _finalize_buy(update, context, requirement):
     date_str  = datetime.now(IST).strftime("%d %b %Y")
     uname_str = f"@{user.username}" if user.username else user.full_name
 
-    card = (
-        "🛍️ *BUY REQUEST*\n"
+    card = decorate(
+        "🛍️ <b>BUY REQUEST</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔍 Tool: {tool_name}\n"
-        f"💰 Budget: ₹{budget}\n"
-        f"📋 Requirement: {requirement}\n"
+        f"🔍 Tool: {h(tool_name)}\n"
+        f"💰 Budget: ₹{h(budget)}\n"
+        f"📋 Requirement: {h(requirement)}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 Buyer: {uname_str}\n"
+        f"👤 Buyer: {h(uname_str)}\n"
         f"📅 Posted: {date_str}\n"
         f"🆔 Request ID: #{listing['id']}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "If you have this tool, DM the buyer! 💬"
+        "💬 If you have this tool, DM the buyer!"
     )
     try:
-        await context.bot.send_message(chat_id=GROUP_ID, text=card, parse_mode="Markdown")
+        await context.bot.send_message(chat_id=GROUP_ID, text=card, parse_mode="HTML")
         await update.message.reply_text(
             f"✅ Buy request posted! ID: #{listing['id']}",
             reply_markup=back_home(),
@@ -1153,14 +1206,14 @@ async def daily_morning_post(context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(
             chat_id=GROUP_ID,
-            text=(
-                "🌅 *Good Morning, AI Tools Buy/Sell Community!* ☀️\n\n"
+            text=decorate(
+                "🌅 <b>Good Morning, AI Tools Buy/Sell Community!</b> ☀️\n\n"
                 f"Today's active listings:\n"
                 f"🔥 Sell: {sell_count}\n"
                 f"🛍️ Buy: {buy_count}\n\n"
-                "Find amazing deals today! 🚀"
+                "🚀 Find amazing deals today!"
             ),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
     except TelegramError as e:
         logger.error(f"Morning post error: {e}")
@@ -1170,23 +1223,25 @@ async def weekly_leaderboard_post(context: ContextTypes.DEFAULT_TYPE):
     top_trust   = await get_top_by_trust(10)
     top_sellers = await get_top_sellers_by_rating(10)
 
-    lines = ["🏆 *Weekly Leaderboard — Top Trusted Sellers!* 🏆\n"]
+    lines = ["🏆 <b>Weekly Leaderboard — Top Trusted Sellers!</b> 🏆\n"]
     for i, m in enumerate(top_trust, 1):
         uname = f"@{m['username']}" if m.get("username") else m.get("full_name", "?")
         badge = m.get("badge") or ""
         trust = m.get("trust_count", 0)
-        lines.append(f"{i}. {uname} {badge} — 👍 {trust} trust votes")
+        lines.append(f"{i}. {h(uname)} {h(badge)} — 👍 {trust} trust votes")
 
-    lines.append("\n⭐ *Top Rated Sellers:*\n")
+    lines.append("\n⭐ <b>Top Rated Sellers:</b>\n")
     for i, m in enumerate(top_sellers, 1):
         uname    = f"@{m['username']}" if m.get("username") else m.get("full_name", "?")
         verified = "✅" if m.get("is_verified") else ""
         rating   = m.get("avg_rating", 0)
-        lines.append(f"{i}. {uname} {verified} — ⭐ {rating}/5")
+        lines.append(f"{i}. {h(uname)} {verified} — ⭐ {rating}/5")
 
     try:
         await context.bot.send_message(
-            chat_id=GROUP_ID, text="\n".join(lines), parse_mode="Markdown",
+            chat_id=GROUP_ID,
+            text=decorate("\n".join(lines)),
+            parse_mode="HTML",
         )
     except TelegramError as e:
         logger.error(f"Weekly leaderboard error: {e}")
@@ -1883,27 +1938,27 @@ async def mycard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = member.get("username") or user.username or "N/A"
     full_name = member.get("full_name") or username
 
-    text = (
-        "🙋 *TRUST VOTE REQUEST*\n"
+    text = decorate(
+        "🙋 <b>TRUST VOTE REQUEST</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 Name: {full_name}\n"
-        f"🔗 Username: @{username}\n"
+        f"👤 Name: {h(full_name)}\n"
+        f"🔗 Username: @{h(username)}\n"
         f"⏱️ Avg Response: {rt} mins\n"
         f"📦 Total Deals: {deals}\n"
         f"⭐ Rating: {avg}/5 ({count} reviews)\n"
         f"✅ Verified: {verified}\n"
-        f"🏆 Badge: {badge}\n"
+        f"🏆 Badge: {h(badge)}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"👍 Trust Votes: {trust}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🙏 *If you've dealt with me, please give a trust vote!*"
+        "🙏 <b>If you've dealt with me, please give a trust vote!</b>"
     )
 
     try:
         await context.bot.send_message(
             chat_id=GROUP_ID,
             text=text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=trust_profile_kb(user.id),
         )
         context.bot_data["card_cooldown"][user.id] = time.time()
@@ -2116,6 +2171,25 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await edit_or_reply(update, "🃏 *Seller Card*\nUsage: `/sellercard @username`",
                                 parse_mode="Markdown", reply_markup=admin_panel_kb())
 
+        elif data == "adm:emoji":
+            if not await is_admin(query.from_user.id, context):
+                await query.answer("Admins only!", show_alert=True)
+                return
+            context.bot_data["emoji_capture_admin"] = query.from_user.id
+            await edit_or_reply(
+                update,
+                "🎬 <b>Emoji Capture Mode ON</b>\n\n"
+                "Send me any message containing custom animated emoji.\n\n"
+                "💡 <b>How to get custom emoji:</b>\n"
+                "• Use emoji packs from Telegram Premium\n"
+                "• Forward a message that has animated emoji\n"
+                "• Type custom emoji directly if you have Premium\n\n"
+                "I'll automatically detect and save all custom emoji IDs.\n"
+                "Send /cancel to exit capture mode.",
+                parse_mode="HTML",
+                reply_markup=back_home(),
+            )
+
     except Exception as e:
         logger.error(f"menu_router error on '{data}': {e}")
 
@@ -2261,6 +2335,12 @@ def main():
     application.add_handler(CommandHandler("setbadge",    setbadge))
     application.add_handler(CommandHandler("editbadge",   editbadge))
     application.add_handler(CommandHandler("removebadge", removebadge))
+
+    # Emoji capture (private DM from admin — highest priority for TEXT in DM)
+    application.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & (filters.TEXT | filters.FORWARDED),
+        emoji_capture_handler,
+    ), group=0)
 
     # Group message filters
     application.add_handler(MessageHandler(

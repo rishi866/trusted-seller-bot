@@ -141,6 +141,7 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
         ],
         [
             _btn("🃏 Seller Card",  callback_data="adm:sellercard_info", style=SUCCESS),
+            _btn("🎬 Emoji Capture", callback_data="adm:emoji",          style=PRIMARY),
         ],
         [_btn("🏠 Main Menu", callback_data="menu:home", style=PRIMARY)],
     ])
