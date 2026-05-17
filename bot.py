@@ -2536,7 +2536,14 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if is_adm:
         text += "\n⚙️ Tap <b>Admin Panel</b> for admin tools."
-    await edit_or_reply(update, text, parse_mode="HTML", reply_markup=main_menu(is_adm))
+    in_group = update.effective_chat and update.effective_chat.type != "private"
+    if in_group:
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("💬 Open in DM", url=f"https://t.me/Trust_is_all_bot?start=help")
+        ]])
+    else:
+        kb = main_menu(is_adm)
+    await edit_or_reply(update, text, parse_mode="HTML", reply_markup=kb)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
