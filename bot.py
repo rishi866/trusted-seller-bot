@@ -2449,7 +2449,6 @@ async def deal_init_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def trust_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query     = update.callback_query
-    await query.answer()
     voter     = query.from_user
     seller_id = int(query.data.split("_")[1])
 
