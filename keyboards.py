@@ -1,4 +1,5 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+import emoji_fx
 
 PRIMARY = "primary"
 SUCCESS = "success"
@@ -15,7 +16,18 @@ def _btn(
     callback_data: str | None = None,
     url: str | None = None,
     style: str | None = None,
+    disable_icon_extract: bool = False,
 ) -> InlineKeyboardButton:
+    """Build an InlineKeyboardButton with optional style + animated icon.
+
+    Leading emoji in the label is auto-converted to icon_custom_emoji_id so
+    buttons show the animated version on Premium clients (Bot API 9.6+).
+    """
+    label = text
+    icon_id = None
+    if not disable_icon_extract:
+        icon_id, label = emoji_fx.extract_button_icon(text)
+
     kwargs: dict = {}
     if callback_data is not None:
         kwargs["callback_data"] = callback_data
@@ -23,7 +35,9 @@ def _btn(
         kwargs["url"] = url
     if style is not None:
         kwargs["style"] = style
-    return InlineKeyboardButton(text, **kwargs)
+    if icon_id is not None:
+        kwargs["icon_custom_emoji_id"] = icon_id
+    return InlineKeyboardButton(label, **kwargs)
 
 
 # ── Main Menu ─────────────────────────────────────────────────────────────────

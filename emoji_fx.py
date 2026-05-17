@@ -118,6 +118,35 @@ def h(text: str) -> str:
     )
 
 
+def extract_button_icon(label: str) -> tuple[str | None, str]:
+    """Pull the leading emoji off a button label and return its custom-emoji ID.
+
+    Returns (icon_custom_emoji_id, stripped_label). If the label doesn't start
+    with a known emoji, returns (None, label) unchanged.
+
+    Used by keyboards._btn to set icon_custom_emoji_id on InlineKeyboardButton
+    so buttons get animated icons (Bot API 9.6+).
+    """
+    if not label or not _EMOJI_MAP:
+        return None, label
+    i = 0
+    while i < len(label) and label[i] in " \t\n":
+        i += 1
+    s = label[i:]
+    for ch in sorted(_EMOJI_MAP.keys(), key=len, reverse=True):
+        if not ch or not s.startswith(ch):
+            continue
+        custom_id = _EMOJI_MAP.get(ch) or _EMOJI_MAP.get(_norm(ch))
+        if not custom_id:
+            continue
+        tail = s[len(ch):]
+        j = 0
+        while j < len(tail) and tail[j] in " \t\n":
+            j += 1
+        return custom_id, tail[j:]
+    return None, label
+
+
 def entities_to_html(text: str, entities) -> str:
     """Convert Telegram message text + entities list to HTML.
 
