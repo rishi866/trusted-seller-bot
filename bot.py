@@ -2236,6 +2236,22 @@ async def ranking_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
 
 
+async def _send_or_dm(context, query, user_id: int, text: str, **kwargs):
+    """Send text as DM if in group, else reply in chat. Shows popup if DM fails."""
+    is_group = query.message.chat.type in ("group", "supergroup")
+    if is_group:
+        try:
+            await context.bot.send_message(chat_id=user_id, text=text, **kwargs)
+            await query.answer("📬 Check your DM!", show_alert=True)
+        except TelegramError:
+            await query.answer(
+                "❗ Start the bot in DM first: send /start to the bot privately.",
+                show_alert=True,
+            )
+    else:
+        await query.message.reply_text(text, **kwargs)
+
+
 async def review_prompt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Tapped '⭐ Leave Review' on a seller card — show review command."""
     query     = update.callback_query
@@ -2243,7 +2259,8 @@ async def review_prompt_callback(update: Update, context: ContextTypes.DEFAULT_T
     seller_id = int(query.data.split("_")[2])
     member    = await get_member(seller_id)
     uname     = f"@{member['username']}" if member and member.get("username") else f"user#{seller_id}"
-    await query.message.reply_text(
+    await _send_or_dm(
+        context, query, query.from_user.id,
         decorate(
             f"⭐ <b>Leave a Review for {h(uname)}</b>\n\n"
             "Use the command below:\n\n"
@@ -2262,7 +2279,8 @@ async def deal_init_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     seller_id = int(query.data.split("_")[2])
     member    = await get_member(seller_id)
     uname     = f"@{member['username']}" if member and member.get("username") else f"user#{seller_id}"
-    await query.message.reply_text(
+    await _send_or_dm(
+        context, query, query.from_user.id,
         decorate(
             f"🤝 <b>Start a Deal with {h(uname)}</b>\n\n"
             "Use the command below — replace the values:\n\n"
@@ -2354,11 +2372,39 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Route all menu:* callbacks to the right handler."""
     query = update.callback_query
     await query.answer()
-    data  = query.data
+    data      = query.data
+    is_group  = query.message.chat.type in ("group", "supergroup")
+
+    # In groups, deep-menu actions (sell/buy/search conversations) don't work.
+    # Redirect user to DM for those.
+    if is_group and data not in ("menu:home",):
+        try:
+            await context.bot.send_message(
+                chat_id=query.from_user.id,
+                text=decorate(
+                    "👋 <b>Bot ka menu DM mein use karo!</b>\n\n"
+                    "Group mein sirf <code>/card</code>, <code>/deal</code>, "
+                    "<code>/review</code>, <code>/dispute</code> commands work karte hain.\n\n"
+                    "Menu ke liye DM mein /start likho."
+                ),
+                parse_mode="HTML",
+                reply_markup=back_home(),
+            )
+            await query.answer("📬 Check your DM!", show_alert=True)
+        except TelegramError:
+            await query.answer(
+                "Bot ko DM mein /start karo pehle!",
+                show_alert=True,
+            )
+        return
 
     try:
         if data == "menu:home":
             is_adm = await is_admin(query.from_user.id, context)
+            if is_group:
+                # In group — just show a popup, don't edit the group message
+                await query.answer("Bot ka full menu DM mein /start karo!", show_alert=True)
+                return
             await edit_or_reply(
                 update,
                 f"👋 *Welcome back, {query.from_user.first_name}!*\n\nChoose an option 👇",
