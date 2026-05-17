@@ -1547,10 +1547,31 @@ async def review_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ Failed to submit review.")
 
     stars = "⭐" * rating
+    reviewer_name = f"@{user.username}" if user.username else user.full_name or f"user#{user.id}"
     await update.message.reply_text(
-        f"✅ Review submitted!\n{stars} ({rating}/5)\n📝 {comment}",
+        decorate(
+            f"✅ <b>Review submitted!</b>\n"
+            f"{stars} ({rating}/5)\n"
+            f"📝 {h(comment)}"
+        ),
+        parse_mode="HTML",
         reply_markup=back_home(),
     )
+
+    # Notify seller via DM
+    try:
+        await context.bot.send_message(
+            chat_id=seller_id,
+            text=decorate(
+                f"⭐ <b>New Review!</b>\n\n"
+                f"{h(reviewer_name)} ne review diya:\n"
+                f"{stars} ({rating}/5)\n"
+                f"📝 {h(comment)}"
+            ),
+            parse_mode="HTML",
+        )
+    except TelegramError:
+        pass
 
     avg, count = await get_seller_avg_rating(seller_id)
     if avg < LOW_RATING_THRESHOLD and count >= LOW_RATING_MIN_REVIEWS:
@@ -1558,12 +1579,12 @@ async def review_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=admin_id,
-                    text=(
-                        f"🚨 *Low Rating Alert!*\n\n"
-                        f"Seller: @{seller.get('username', seller_id)}\n"
+                    text=decorate(
+                        f"🚨 <b>Low Rating Alert!</b>\n\n"
+                        f"Seller: @{h(seller.get('username', str(seller_id)))}\n"
                         f"Avg Rating: {avg}/5 ({count} reviews)"
                     ),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                 )
             except TelegramError:
                 pass
@@ -1584,8 +1605,10 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _build_seller_card_text(member: dict) -> str:
     """Build the full HTML seller card text used in profile views."""
-    avg, count  = await get_seller_avg_rating(member["user_id"])
-    reviews     = await get_seller_reviews(member["user_id"], 3)
+    uid         = member["user_id"]
+    avg, count  = await get_seller_avg_rating(uid)
+    reviews     = await get_seller_reviews(uid, 3)
+    listings    = await get_user_listings(uid)
     uname       = f"@{member['username']}" if member.get("username") else member.get("full_name", "?")
     verified    = "✅ Yes" if member.get("is_verified") else "❌ No"
     badge       = member.get("badge") or "—"
@@ -1610,6 +1633,15 @@ async def _build_seller_card_text(member: dict) -> str:
         for r in reviews:
             s = "⭐" * r["rating"]
             text += f"{s} — {h(r.get('comment', '')[:80])}\n"
+        text += "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    if listings:
+        text += "🛒 <b>Active Listings:</b>\n"
+        for lst in listings[:5]:
+            ltype = "🔥 SELL" if lst.get("type") == "sell" else "🛍️ BUY"
+            price = f"₹{lst['price']}" if lst.get("price") else "Price on ask"
+            text += f"• {ltype} <b>{h(lst.get('tool_name','?'))}</b> — {h(price)}\n"
+        if len(listings) > 5:
+            text += f"  <i>...and {len(listings)-5} more</i>\n"
     return text
 
 
@@ -2036,6 +2068,84 @@ async def canceldeal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DISPUTE
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def dispute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/dispute <deal_id> <reason> — escalate a deal dispute to admins."""
+    user = update.effective_user
+    if not context.args or len(context.args) < 2:
+        return await update.message.reply_text(
+            "Usage: <code>/dispute &lt;deal_id&gt; &lt;reason&gt;</code>\n"
+            "Example: <code>/dispute 42 Seller sent wrong account</code>",
+            parse_mode="HTML",
+            reply_markup=back_home(),
+        )
+    try:
+        deal_id = int(context.args[0])
+    except ValueError:
+        return await update.message.reply_text("❌ Provide a valid deal ID.")
+
+    reason = " ".join(context.args[1:])
+    deal   = await get_deal(deal_id)
+    if not deal:
+        return await update.message.reply_text("❌ Deal not found.")
+    if user.id not in [deal["buyer_id"], deal["seller_id"]]:
+        return await update.message.reply_text("❌ This deal doesn't belong to you.")
+    if deal["status"] in ["completed", "cancelled", "disputed"]:
+        return await update.message.reply_text(f"❌ Deal #{deal_id} is already {deal['status']}.")
+
+    await update_deal(deal_id, status="disputed")
+
+    reporter_name = f"@{user.username}" if user.username else user.full_name or f"user#{user.id}"
+    buyer_id  = deal["buyer_id"]
+    seller_id = deal["seller_id"]
+    buyer_m   = await get_member(buyer_id)
+    seller_m  = await get_member(seller_id)
+    buyer_tag  = f"@{buyer_m['username']}"  if buyer_m  and buyer_m.get("username")  else f"user#{buyer_id}"
+    seller_tag = f"@{seller_m['username']}" if seller_m and seller_m.get("username") else f"user#{seller_id}"
+
+    alert_text = decorate(
+        f"🚨 <b>Deal Dispute Raised!</b>\n\n"
+        f"🆔 Deal #{deal_id}\n"
+        f"🛒 Buyer:  {h(buyer_tag)}\n"
+        f"💰 Seller: {h(seller_tag)}\n"
+        f"👤 Raised by: {h(reporter_name)}\n\n"
+        f"📝 Reason: {h(reason)}\n\n"
+        "Deal status set to <b>disputed</b>. Please review."
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=alert_text, parse_mode="HTML")
+        except TelegramError:
+            pass
+
+    other_id = seller_id if user.id == buyer_id else buyer_id
+    try:
+        await context.bot.send_message(
+            chat_id=other_id,
+            text=decorate(
+                f"🚨 <b>Deal #{deal_id} Disputed</b>\n\n"
+                f"{h(reporter_name)} ne dispute raise kiya hai.\n"
+                f"📝 Reason: {h(reason)}\n\n"
+                "Admins ko notify kar diya gaya hai."
+            ),
+            parse_mode="HTML",
+        )
+    except TelegramError:
+        pass
+
+    await update.message.reply_text(
+        decorate(
+            f"✅ <b>Dispute raised for Deal #{deal_id}</b>\n\n"
+            "Admins ko alert bhej diya gaya hai. Jaldi review hoga."
+        ),
+        parse_mode="HTML",
+        reply_markup=back_home(),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # FEATURE 9 — SELLER CARD & TRUST VOTING
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2126,6 +2236,25 @@ async def ranking_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
 
 
+async def review_prompt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tapped '⭐ Leave Review' on a seller card — show review command."""
+    query     = update.callback_query
+    await query.answer()
+    seller_id = int(query.data.split("_")[2])
+    member    = await get_member(seller_id)
+    uname     = f"@{member['username']}" if member and member.get("username") else f"user#{seller_id}"
+    await query.message.reply_text(
+        decorate(
+            f"⭐ <b>Leave a Review for {h(uname)}</b>\n\n"
+            "Use the command below:\n\n"
+            f"<code>/review {h(uname)} 5 Acha seller hai, fast delivery!</code>\n\n"
+            "Rating 1–5 de sakte ho. Comment required hai."
+        ),
+        parse_mode="HTML",
+        reply_markup=back_home(),
+    )
+
+
 async def deal_init_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Tapped '🤝 Start Deal' on a seller profile — show how to initiate."""
     query     = update.callback_query
@@ -2162,6 +2291,23 @@ async def trust_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     await query.answer(msgs.get(result, "❌ An error occurred."), show_alert=True)
 
+    if result == "ok":
+        voter_name = f"@{voter.username}" if voter.username else voter.full_name or f"user#{voter.id}"
+        seller = await get_member(seller_id)
+        new_trust = (seller.get("trust_count") or 0) if seller else "?"
+        try:
+            await context.bot.send_message(
+                chat_id=seller_id,
+                text=decorate(
+                    f"👍 <b>New Trust Vote!</b>\n\n"
+                    f"{h(voter_name)} ne tumhe trust vote diya.\n"
+                    f"🏆 Total Trust Votes: <b>{new_trust}</b>"
+                ),
+                parse_mode="HTML",
+            )
+        except TelegramError:
+            pass
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELP
@@ -2191,6 +2337,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/deal @buyer @seller amount</code> — New deal\n"
         "<code>/dealcomplete id</code> — Confirm deal done\n"
         "<code>/canceldeal id</code> — Cancel a deal\n"
+        "<code>/dispute id reason</code> — Raise dispute to admins\n"
         "<code>/delist id</code> — Remove your listing\n"
         "<code>/verified</code> — List verified sellers\n"
     )
@@ -2455,6 +2602,7 @@ def main():
     application.add_handler(CallbackQueryHandler(deal_callback,         pattern=r"^deal_(accept|decline)_"))
     application.add_handler(CallbackQueryHandler(deal_action_callback,  pattern=r"^deal:(complete|cancel):"))
     application.add_handler(CallbackQueryHandler(deal_init_callback,    pattern=r"^deal_init_\d+$"))
+    application.add_handler(CallbackQueryHandler(review_prompt_callback, pattern=r"^review_prompt_\d+$"))
     application.add_handler(CallbackQueryHandler(trust_callback,        pattern=r"^trust_"))
     application.add_handler(CallbackQueryHandler(profile_callback,      pattern=r"^profile_"))
     application.add_handler(CallbackQueryHandler(menu_router,           pattern=r"^(menu:|adm:)"))
@@ -2479,6 +2627,7 @@ def main():
     application.add_handler(CommandHandler("mydeals",     mydeals_cmd))
     application.add_handler(CommandHandler("dealcomplete",dealcomplete_cmd))
     application.add_handler(CommandHandler("canceldeal",  canceldeal_cmd))
+    application.add_handler(CommandHandler("dispute",     dispute_cmd))
     application.add_handler(CommandHandler("mycard",      mycard_cmd))
     application.add_handler(CommandHandler("card",        card_cmd))
 

@@ -102,8 +102,11 @@ def seller_card_kb(seller_id: int) -> InlineKeyboardMarkup:
     """Full action keyboard shown on a seller profile card."""
     return InlineKeyboardMarkup([
         [
-            _btn("👍 Trust Vote",  callback_data=f"trust_{seller_id}",   style=SUCCESS),
+            _btn("👍 Trust Vote",  callback_data=f"trust_{seller_id}",    style=SUCCESS),
             _btn("🤝 Start Deal",  callback_data=f"deal_init_{seller_id}", style=PRIMARY),
+        ],
+        [
+            _btn("⭐ Leave Review", callback_data=f"review_prompt_{seller_id}", style=PRIMARY),
         ],
         [_btn("🏠 Main Menu", callback_data="menu:home", style=PRIMARY)],
     ])
