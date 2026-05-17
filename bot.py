@@ -1241,8 +1241,8 @@ async def announce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=m["user_id"],
-                text=f"📢 *Announcement:*\n\n{message}",
-                parse_mode="Markdown",
+                text=decorate(f"📢 <b>Announcement:</b>\n\n{h(message)}"),
+                parse_mode="HTML",
             )
             sent += 1
         except TelegramError:
@@ -1340,12 +1340,12 @@ async def verify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=admin_id,
-                text=(
-                    f"🔔 *Verification Request!*\n\n"
-                    f"👤 User: {uname_str}\n"
+                text=decorate(
+                    f"🔔 <b>Verification Request!</b>\n\n"
+                    f"👤 User: {h(uname_str)}\n"
                     f"🆔 ID: {user.id}"
                 ),
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=verify_admin_kb(user.id),
             )
         except TelegramError:
@@ -1431,7 +1431,7 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text="🎉 You are now a *Verified Seller*! ✅",
                 parse_mode="Markdown",
             )
-            await context.bot.send_message(chat_id=GROUP_ID, text=f"🎊 {target_name} is now a Verified Seller! ✅")
+            await context.bot.send_message(chat_id=GROUP_ID, text=decorate(f"🎊 <b>{h(target_name)}</b> is now a Verified Seller! ✅"), parse_mode="HTML")
         except TelegramError:
             pass
         await update.message.reply_text(f"✅ {target_name} verified!")
@@ -1643,26 +1643,26 @@ async def deal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ Failed to create deal.")
 
     deal_id = deal["id"]
-    msg = (
-        f"🤝 *New Deal Proposal!*\n\n"
+    msg = decorate(
+        f"🤝 <b>New Deal Proposal!</b>\n\n"
         f"🆔 Deal ID: #{deal_id}\n"
-        f"🛒 Tool: {tool_name}\n"
+        f"🛒 Tool: {h(tool_name)}\n"
         f"💰 Amount: ₹{amount}\n"
-        f"👤 Buyer: @{buyer_username}\n"
-        f"🏪 Seller: @{seller_username}\n\n"
+        f"👤 Buyer: @{h(buyer_username)}\n"
+        f"🏪 Seller: @{h(seller_username)}\n\n"
         "Both parties must accept for the deal to go active!"
     )
 
     try:
         await context.bot.send_message(
-            chat_id=buyer["user_id"], text=msg, parse_mode="Markdown",
+            chat_id=buyer["user_id"], text=msg, parse_mode="HTML",
             reply_markup=deal_propose_kb(deal_id, buyer["user_id"]),
         )
     except TelegramError:
         pass
     try:
         await context.bot.send_message(
-            chat_id=seller["user_id"], text=msg, parse_mode="Markdown",
+            chat_id=seller["user_id"], text=msg, parse_mode="HTML",
             reply_markup=deal_propose_kb(deal_id, seller["user_id"]),
         )
     except TelegramError:
@@ -1827,14 +1827,14 @@ async def dealcomplete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=GROUP_ID,
-                text=(
-                    f"✅ *Deal Completed!*\n\n"
+                text=decorate(
+                    f"✅ <b>Deal Completed!</b>\n\n"
                     f"🆔 Deal ID: #{deal_id}\n"
-                    f"🛒 Tool: {deal['tool_name']}\n"
+                    f"🛒 Tool: {h(deal['tool_name'])}\n"
                     f"💰 Amount: {deal['amount']}\n\n"
-                    "Congratulations to both parties! 🎊"
+                    "🎊 Congratulations to both parties!"
                 ),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
         except TelegramError:
             pass
@@ -1848,9 +1848,9 @@ async def mydeals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for d in deals:
         role = "Buyer" if d["buyer_id"] == user.id else "Seller"
-        text = (
-            f"📋 *Deal #{d['id']}*\n"
-            f"🛒 Tool: {d['tool_name']}\n"
+        text = decorate(
+            f"📋 <b>Deal #{d['id']}</b>\n"
+            f"🛒 Tool: {h(d['tool_name'])}\n"
             f"💰 Amount: ₹{d['amount']}\n"
             f"👤 Role: {role}\n"
             f"📊 Status: {d['status']}"
@@ -1858,7 +1858,7 @@ async def mydeals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await update.effective_chat.send_message(
                 text,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=deal_actions_kb(d["id"], d["status"]),
             )
         except TelegramError:
