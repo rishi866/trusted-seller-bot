@@ -1373,20 +1373,38 @@ async def removeword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def announce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update.effective_user.id, context):
         return await update.message.reply_text("❌ Admins only.")
-    if not context.args:
-        return await update.message.reply_text("Usage: /announce <message>")
-    message = " ".join(context.args)
+
+    reply = update.message.reply_to_message
+
+    if not reply and not context.args:
+        return await update.message.reply_text(
+            "Usage:\n"
+            "1️⃣ <b>Reply to any message</b> with <code>/announce</code> — sends that message as-is (bold, emoji, photos all preserved)\n"
+            "2️⃣ <code>/announce your text here</code> — sends plain text\n\n"
+            "Tip: Compose your announcement first, then reply to it with /announce.",
+            parse_mode="HTML",
+        )
+
     members = await get_all_members()
     await update.message.reply_text(f"📢 Sending to {len(members)} members...")
 
     sent, failed = 0, 0
     for m in members:
         try:
-            await context.bot.send_message(
-                chat_id=m["user_id"],
-                text=decorate(f"📢 <b>Announcement:</b>\n\n{h(message)}"),
-                parse_mode="HTML",
-            )
+            if reply:
+                # Copy the replied message preserving all formatting, entities, media
+                await context.bot.copy_message(
+                    chat_id=m["user_id"],
+                    from_chat_id=reply.chat_id,
+                    message_id=reply.message_id,
+                )
+            else:
+                message = " ".join(context.args)
+                await context.bot.send_message(
+                    chat_id=m["user_id"],
+                    text=decorate(f"📢 <b>Announcement:</b>\n\n{h(message)}"),
+                    parse_mode="HTML",
+                )
             sent += 1
         except TelegramError:
             failed += 1
