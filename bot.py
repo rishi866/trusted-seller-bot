@@ -10,9 +10,6 @@ from telegram import (
     ChatPermissions,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     ChatMember,
 )
 from telegram.ext import (
@@ -26,7 +23,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from telegram.error import TelegramError
+from telegram.error import TelegramError, BadRequest
 
 import pytz
 
@@ -84,6 +81,15 @@ from db import (
     set_verified,
     get_verified_sellers,
 )
+from keyboards import (
+    main_menu,
+    back_home,
+    trust_profile_kb,
+    verify_admin_kb,
+    deal_propose_kb,
+    deal_actions_kb,
+    admin_panel_kb,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,25 +117,6 @@ BUY_NAME, BUY_BUDGET, BUY_REQ = range(4, 7)
 SEARCH_QUERY = 7
 
 # ─────────────────────────────────────────────────────────────────────────────
-# KEYBOARD MENUS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def get_main_keyboard(is_admin_user: bool = False) -> ReplyKeyboardMarkup:
-    keyboard = [
-        [KeyboardButton("🛒 Sell"), KeyboardButton("🛍️ Buy")],
-        [KeyboardButton("🔍 Search"), KeyboardButton("📋 My Listings")],
-        [KeyboardButton("🔗 My Referral Link"), KeyboardButton("📊 My Stats")],
-        [KeyboardButton("👤 My Profile"), KeyboardButton("🏆 Leaderboard")],
-        [KeyboardButton("⭐ Top Sellers"), KeyboardButton("👑 Trust Ranking")],
-        [KeyboardButton("✅ Get Verified"), KeyboardButton("🤝 My Deals")],
-        [KeyboardButton("🏅 Badges"), KeyboardButton("❓ Help")],
-    ]
-    if is_admin_user:
-        keyboard.append([KeyboardButton("⚙️ Admin Panel")])
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -150,17 +137,14 @@ def username_display(user) -> str:
 
 
 async def resolve_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Returns (user_id, username) from a reply or @mention argument."""
     msg = update.effective_message
     if msg.reply_to_message:
         target = msg.reply_to_message.from_user
         return target.id, target.username or target.full_name
     if context.args:
         arg = context.args[0].lstrip("@")
-        # Try to parse as numeric id
         if arg.isdigit():
             return int(arg), arg
-        # Look up by username in members table
         member = await get_member_by_username(arg)
         if member:
             return member["user_id"], member.get("username", arg)
@@ -168,8 +152,6 @@ async def resolve_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def get_member_by_username(username: str):
-    """Fetch member row by username (without @)."""
-    import asyncio
     from db import get_supabase
     def _get():
         res = get_supabase().table("members").select("*").ilike("username", username).execute()
@@ -180,17 +162,33 @@ async def get_member_by_username(username: str):
         return None
 
 
+async def edit_or_reply(update: Update, text: str, **kwargs):
+    """Edit message if from callback, otherwise reply."""
+    q = update.callback_query
+    if q:
+        try:
+            await q.edit_message_text(text, **kwargs)
+            return
+        except (BadRequest, TelegramError):
+            pass
+        try:
+            await update.effective_chat.send_message(text, **kwargs)
+        except TelegramError:
+            pass
+    elif update.effective_message:
+        await update.effective_message.reply_text(text, **kwargs)
+
+
 async def post_seller_card(bot, seller_id: int, chat_id: int):
-    """Post a seller spotlight card with trust/profile buttons."""
     member = await get_member(seller_id)
     if not member:
         return
     avg, count = await get_seller_avg_rating(seller_id)
-    badge = member.get("badge") or "—"
+    badge    = member.get("badge") or "—"
     verified = "✅ Yes" if member.get("is_verified") else "❌ No"
-    response_time = member.get("avg_response_time") or 0
-    total_deals = member.get("total_deals") or 0
-    trust = member.get("trust_count") or 0
+    rt       = member.get("avg_response_time") or 0
+    deals    = member.get("total_deals") or 0
+    trust    = member.get("trust_count") or 0
     username = member.get("username") or "N/A"
     full_name = member.get("full_name") or username
 
@@ -200,8 +198,8 @@ async def post_seller_card(bot, seller_id: int, chat_id: int):
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 Name: {full_name}\n"
         f"🔗 Username: @{username}\n"
-        f"⏱️ Avg Response Time: {response_time} mins\n"
-        f"📦 Total Deals: {total_deals}\n"
+        f"⏱️ Avg Response: {rt} mins\n"
+        f"📦 Total Deals: {deals}\n"
         f"⭐ Rating: {avg}/5 ({count} reviews)\n"
         f"✅ Verified: {verified}\n"
         f"🏆 Badge: {badge}\n"
@@ -209,34 +207,31 @@ async def post_seller_card(bot, seller_id: int, chat_id: int):
         f"👍 Trust Votes: {trust}\n"
         "╚════════════════════════╝"
     )
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("👍 Trust Karta Hoon", callback_data=f"trust_{seller_id}"),
-            InlineKeyboardButton("👤 View Profile", callback_data=f"profile_{seller_id}"),
-        ]
-    ])
     try:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown", reply_markup=keyboard)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=trust_profile_kb(seller_id),
+        )
     except TelegramError as e:
         logger.error(f"post_seller_card error: {e}")
 
 
-async def check_and_update_badge(user_id: int, old_count: int, new_count: int, bot, chat_id: int, username: str):
-    """Check if user crossed a badge milestone and announce/promote."""
+async def check_and_update_badge(user_id, old_count, new_count, bot, chat_id, username):
     all_badges = await get_all_badges()
-    earned_badge = None
+    earned = None
     for b in all_badges:
         if old_count < b["required_count"] <= new_count:
-            earned_badge = b
-    if earned_badge:
-        await update_member(user_id, badge=earned_badge["badge_name"])
+            earned = b
+    if earned:
+        await update_member(user_id, badge=earned["badge_name"])
         try:
             await bot.send_message(
                 chat_id=chat_id,
                 text=(
                     f"🎉 Congratulations @{username}!\n"
-                    f"You have earned the *{earned_badge['badge_name']}* badge! 🏆\n"
+                    f"You earned the *{earned['badge_name']}* badge! 🏆\n"
                     f"Total Referrals: {new_count}"
                 ),
                 parse_mode="Markdown",
@@ -250,7 +245,6 @@ async def check_and_update_badge(user_id: int, old_count: int, new_count: int, b
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle new member joins."""
     result = update.chat_member
     if not result or result.chat.id != GROUP_ID:
         return
@@ -263,40 +257,38 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
     if user.is_bot:
         return
 
-    user_id = user.id
+    user_id  = user.id
     username = user.username or user.full_name
 
-    # Register member
     await get_or_create_member(user_id, user.username or "", user.full_name or "")
 
-    # Mute the new member
     try:
         await context.bot.restrict_chat_member(chat_id=GROUP_ID, user_id=user_id, permissions=MUTED)
     except TelegramError as e:
         logger.warning(f"Could not mute new member {user_id}: {e}")
 
-    # Build captcha
     a = random.randint(1, 9)
     b = random.randint(1, 9)
-    correct_answer = a + b
-    wrong1 = correct_answer + random.choice([-2, -1, 1, 2, 3])
-    wrong2 = correct_answer + random.choice([-3, -1, 2, 4, 5])
-    if wrong2 == wrong1:
-        wrong2 += 1
-    if wrong1 == correct_answer:
-        wrong1 += 1
-    if wrong2 == correct_answer:
-        wrong2 += 1
+    correct = a + b
+    wrong1  = correct + random.choice([-2, -1, 1, 2, 3])
+    wrong2  = correct + random.choice([-3, -1, 2, 4, 5])
+    if wrong2 == wrong1: wrong2 += 1
+    if wrong1 == correct: wrong1 += 1
+    if wrong2 == correct: wrong2 += 1
 
     options = [
-        (str(correct_answer), f"captcha_{user_id}_1"),
-        (str(wrong1), f"captcha_{user_id}_0"),
-        (str(wrong2), f"captcha_{user_id}_0"),
+        (str(correct), f"captcha_{user_id}_1"),
+        (str(wrong1),  f"captcha_{user_id}_0"),
+        (str(wrong2),  f"captcha_{user_id}_0"),
     ]
     random.shuffle(options)
 
+    from keyboards import _btn, PRIMARY, SUCCESS, DANGER
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(text=opt[0], callback_data=opt[1]) for opt in options]
+        [
+            InlineKeyboardButton(text=opt[0], callback_data=opt[1])
+            for opt in options
+        ]
     ])
 
     try:
@@ -304,7 +296,7 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
             chat_id=GROUP_ID,
             text=(
                 f"👋 Welcome @{username}!\n"
-                f"Prove you are human — Answer this: *{a} + {b} = ?*\n"
+                f"Prove you are human — *{a} + {b} = ?*\n"
                 f"⏳ You have {CAPTCHA_TIMEOUT} seconds!"
             ),
             parse_mode="Markdown",
@@ -312,15 +304,11 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         if "pending_captcha" not in context.bot_data:
             context.bot_data["pending_captcha"] = {}
-        context.bot_data["pending_captcha"][user_id] = {
-            "msg_id": msg.message_id,
-            "correct_answer": correct_answer,
-        }
+        context.bot_data["pending_captcha"][user_id] = {"msg_id": msg.message_id}
     except TelegramError as e:
         logger.error(f"Captcha send error: {e}")
         return
 
-    # Schedule kick job
     context.job_queue.run_once(
         kick_unverified,
         when=CAPTCHA_TIMEOUT,
@@ -330,20 +318,17 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle captcha button presses."""
     query = update.callback_query
     await query.answer()
 
-    data = query.data  # captcha_{user_id}_{answer}
-    parts = data.split("_")
+    parts = query.data.split("_")
     if len(parts) != 3:
         return
 
     target_user_id = int(parts[1])
-    is_correct = parts[2] == "1"
-    voter = query.from_user
+    is_correct     = parts[2] == "1"
+    voter          = query.from_user
 
-    # Only the actual user can answer their own captcha
     if voter.id != target_user_id:
         await query.answer("This captcha is not for you! 😤", show_alert=True)
         return
@@ -355,36 +340,31 @@ async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     captcha_info = pending.pop(target_user_id)
     msg_id = captcha_info.get("msg_id")
 
-    # Cancel the kick job
-    jobs = context.job_queue.get_jobs_by_name(f"kick_if_not_verified_{target_user_id}")
-    for job in jobs:
+    for job in context.job_queue.get_jobs_by_name(f"kick_if_not_verified_{target_user_id}"):
         job.schedule_removal()
 
-    # Delete captcha message
     try:
         await context.bot.delete_message(chat_id=GROUP_ID, message_id=msg_id)
     except TelegramError:
         pass
 
     if is_correct:
-        # Unmute
         try:
             await context.bot.restrict_chat_member(chat_id=GROUP_ID, user_id=target_user_id, permissions=UNMUTED)
         except TelegramError as e:
             logger.error(f"Unmute error: {e}")
         try:
-            welcome_msg = await context.bot.send_message(
+            await context.bot.send_message(
                 chat_id=GROUP_ID,
                 text=(
-                    f"✅ Welcome to *AI Tools Buy/Sell* community, {username_display(voter)}! 🎉\n"
-                    f"Please read the rules, explore listings, and enjoy trading! 🚀"
+                    f"✅ Welcome to *AI Tools Buy/Sell*, {username_display(voter)}! 🎉\n"
+                    "Read the rules, explore listings, and enjoy trading! 🚀"
                 ),
                 parse_mode="Markdown",
             )
         except TelegramError:
             pass
     else:
-        # Kick user
         try:
             await context.bot.ban_chat_member(chat_id=GROUP_ID, user_id=target_user_id)
             await context.bot.unban_chat_member(chat_id=GROUP_ID, user_id=target_user_id)
@@ -393,17 +373,16 @@ async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=GROUP_ID,
-                text=f"❌ {username_display(voter)} answered the captcha incorrectly and was removed! 🚫",
+                text=f"❌ {username_display(voter)} answered the captcha wrong and was removed! 🚫",
             )
         except TelegramError:
             pass
 
 
 async def kick_unverified(context: ContextTypes.DEFAULT_TYPE):
-    """Job: kick user who didn't complete captcha in time."""
     job_data = context.job.data
-    user_id = job_data["user_id"]
-    chat_id = job_data["chat_id"]
+    user_id  = job_data["user_id"]
+    chat_id  = job_data["chat_id"]
 
     pending = context.bot_data.get("pending_captcha", {})
     if user_id not in pending:
@@ -426,14 +405,13 @@ async def kick_unverified(context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"⏰ Captcha timeout! A user was removed for not completing verification.",
+            text="⏰ Captcha timeout — a user was removed for not completing verification.",
         )
     except TelegramError:
         pass
 
 
 async def link_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete messages containing links from non-admins."""
     msg = update.effective_message
     if not msg or not msg.text:
         return
@@ -441,13 +419,10 @@ async def link_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = update.effective_user
-    if not user:
-        return
-    if await is_admin(user.id, context):
+    if not user or await is_admin(user.id, context):
         return
 
-    link_pattern = r'(https?://|www\.|t\.me/|@\w+\.\w+)'
-    if re.search(link_pattern, msg.text, re.IGNORECASE):
+    if re.search(r'(https?://|www\.|t\.me/|@\w+\.\w+)', msg.text, re.IGNORECASE):
         try:
             await msg.delete()
         except TelegramError:
@@ -455,19 +430,16 @@ async def link_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         until = datetime.now(timezone.utc) + timedelta(minutes=5)
         try:
             await context.bot.restrict_chat_member(
-                chat_id=GROUP_ID,
-                user_id=user.id,
-                permissions=MUTED,
-                until_date=until,
+                chat_id=GROUP_ID, user_id=user.id, permissions=MUTED, until_date=until,
             )
         except TelegramError:
             pass
         try:
-            warn_msg = await context.bot.send_message(
+            await context.bot.send_message(
                 chat_id=GROUP_ID,
                 text=(
                     f"⚠️ {username_display(user)}, links are not allowed without admin permission!\n"
-                    f"You have been muted for 5 minutes. 🔇"
+                    "You have been muted for 5 minutes. 🔇"
                 ),
             )
         except TelegramError:
@@ -475,7 +447,6 @@ async def link_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def scam_word_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete messages containing scam words."""
     msg = update.effective_message
     if not msg or not msg.text:
         return
@@ -483,9 +454,7 @@ async def scam_word_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = update.effective_user
-    if not user:
-        return
-    if await is_admin(user.id, context):
+    if not user or await is_admin(user.id, context):
         return
 
     scam_words = context.bot_data.get("scam_words_cache", [])
@@ -500,8 +469,8 @@ async def scam_word_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(
                     chat_id=GROUP_ID,
                     text=(
-                        f"🚨 {username_display(user)}, a scam-related keyword was detected in your message!\n"
-                        f"Your message has been deleted. Please follow community rules. ⚠️"
+                        f"🚨 {username_display(user)}, a scam-related keyword was detected!\n"
+                        "Your message has been deleted. Please follow community rules. ⚠️"
                     ),
                 )
             except TelegramError:
@@ -510,7 +479,6 @@ async def scam_word_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def anti_flood_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mute users who send too many messages too fast."""
     msg = update.effective_message
     if not msg:
         return
@@ -518,22 +486,17 @@ async def anti_flood_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = update.effective_user
-    if not user:
-        return
-    if await is_admin(user.id, context):
+    if not user or await is_admin(user.id, context):
         return
 
     if "flood_tracker" not in context.bot_data:
         context.bot_data["flood_tracker"] = {}
 
-    now = time.time()
+    now     = time.time()
     tracker = context.bot_data["flood_tracker"]
-    uid = user.id
+    uid     = user.id
 
-    if uid not in tracker:
-        tracker[uid] = []
-
-    # Keep only recent timestamps
+    tracker.setdefault(uid, [])
     tracker[uid] = [t for t in tracker[uid] if now - t < FLOOD_TIME_WINDOW]
     tracker[uid].append(now)
 
@@ -542,10 +505,7 @@ async def anti_flood_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         until = datetime.now(timezone.utc) + timedelta(seconds=FLOOD_MUTE_DURATION)
         try:
             await context.bot.restrict_chat_member(
-                chat_id=GROUP_ID,
-                user_id=uid,
-                permissions=MUTED,
-                until_date=until,
+                chat_id=GROUP_ID, user_id=uid, permissions=MUTED, until_date=until,
             )
         except TelegramError:
             pass
@@ -554,7 +514,7 @@ async def anti_flood_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=GROUP_ID,
                 text=(
                     f"🌊 Anti-Flood! {username_display(user)} sent too many messages too fast!\n"
-                    f"You have been muted for 10 minutes. 🔇"
+                    "Muted for 10 minutes. 🔇"
                 ),
             )
         except TelegramError:
@@ -562,7 +522,6 @@ async def anti_flood_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def refresh_scam_words_job(context: ContextTypes.DEFAULT_TYPE):
-    """Refresh scam words cache every 30 minutes."""
     words = await get_scam_words()
     context.bot_data["scam_words_cache"] = words
     logger.info(f"Scam words refreshed: {len(words)} words")
@@ -573,7 +532,6 @@ async def refresh_scam_words_job(context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start with optional referral."""
     user = update.effective_user
     referred_by = None
 
@@ -597,58 +555,57 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             referrer_username = referrer.get("username", "") if referrer else ""
             await check_and_update_badge(
                 referred_by, old_count, new_count,
-                context.bot, GROUP_ID, referrer_username
+                context.bot, GROUP_ID, referrer_username,
             )
 
     is_adm = await is_admin(user.id, context)
-    await update.message.reply_text(
+    await update.effective_chat.send_message(
         f"👋 *Welcome {user.first_name}!*\n\n"
-        "You've joined the *AI Tools Buy/Sell* community! 🎉\n\n"
-        "Use the keyboard buttons below to navigate all features.\n"
-        "Tap any button to get started! 👇",
+        "Welcome to the *AI Tools Buy/Sell* community! 🎉\n\n"
+        "Tap a button below to get started 👇",
         parse_mode="Markdown",
-        reply_markup=get_main_keyboard(is_adm),
+        reply_markup=main_menu(is_adm),
     )
 
 
 async def mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user's referral link."""
     user = update.effective_user
     bot_username = (await context.bot.get_me()).username
     link = f"https://t.me/{bot_username}?start=ref_{user.id}"
-    await update.message.reply_text(
-        f"🔗 Your referral link:\n\n`{link}`\n\n"
-        "Share it with friends and earn badges! 🏆",
+    await edit_or_reply(
+        update,
+        f"🔗 *Your Referral Link*\n\n`{link}`\n\nShare it and earn badges! 🏆",
         parse_mode="Markdown",
+        reply_markup=back_home(),
     )
 
 
 async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user's referral stats and badge info."""
-    user = update.effective_user
+    user   = update.effective_user
     member = await get_or_create_member(user.id, user.username or "", user.full_name or "")
-    count = member.get("referral_count", 0) if member else 0
-    badge = member.get("badge") or "No badge yet"
+    count  = member.get("referral_count", 0) if member else 0
+    badge  = member.get("badge") or "No badge yet"
 
     next_b = await get_next_badge(count)
     next_text = ""
     if next_b:
         needed = next_b["required_count"] - count
-        next_text = f"\n📈 Next Badge: *{next_b['badge_name']}* — {needed} more referrals needed!"
+        next_text = f"\n📈 Next: *{next_b['badge_name']}* — {needed} more referrals"
 
-    await update.message.reply_text(
+    await edit_or_reply(
+        update,
         f"📊 *Your Stats*\n\n"
         f"👥 Total Referrals: *{count}*\n"
         f"🏆 Current Badge: *{badge}*"
         f"{next_text}",
         parse_mode="Markdown",
+        reply_markup=back_home(),
     )
 
 
 async def setbadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: /setbadge <count> <name> [admin]"""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
+        return await update.message.reply_text("❌ Admins only.")
     args = context.args
     if not args or len(args) < 2:
         return await update.message.reply_text("Usage: /setbadge <count> <name> [admin]")
@@ -663,15 +620,14 @@ async def setbadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ Please provide a badge name.")
     ok = await set_badge_config(count, badge_name, is_admin_level)
     if ok:
-        await update.message.reply_text(f"✅ Badge set: *{count}* referrals → *{badge_name}*", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Badge set: *{count}* → *{badge_name}*", parse_mode="Markdown")
     else:
-        await update.message.reply_text("❌ Error while saving badge config.")
+        await update.message.reply_text("❌ Error saving badge.")
 
 
 async def editbadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: /editbadge <count> <new_name>"""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
+        return await update.message.reply_text("❌ Admins only.")
     args = context.args
     if not args or len(args) < 2:
         return await update.message.reply_text("Usage: /editbadge <count> <new_name>")
@@ -684,13 +640,12 @@ async def editbadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ok:
         await update.message.reply_text(f"✅ Badge updated: *{count}* → *{new_name}*", parse_mode="Markdown")
     else:
-        await update.message.reply_text("❌ Error while updating badge.")
+        await update.message.reply_text("❌ Error updating badge.")
 
 
 async def removebadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: /removebadge <count>"""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
+        return await update.message.reply_text("❌ Admins only.")
     if not context.args:
         return await update.message.reply_text("Usage: /removebadge <count>")
     try:
@@ -701,40 +656,40 @@ async def removebadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ok:
         await update.message.reply_text(f"✅ Badge removed for count *{count}*.", parse_mode="Markdown")
     else:
-        await update.message.reply_text("❌ Error while removing badge.")
+        await update.message.reply_text("❌ Error removing badge.")
 
 
 async def badges(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List all badge milestones."""
     all_badges = await get_all_badges()
     if not all_badges:
-        return await update.message.reply_text("🏆 No badge milestones configured yet.")
+        return await edit_or_reply(
+            update, "🏆 No badge milestones configured yet.", reply_markup=back_home()
+        )
     lines = ["🏆 *Badge Milestones:*\n"]
     for b in all_badges:
         admin_tag = " 👑" if b.get("is_admin_level") else ""
         lines.append(f"• *{b['required_count']}* referrals → {b['badge_name']}{admin_tag}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
 
 
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Top 10 referrers."""
     top = await get_top_referrers(10)
     if not top:
-        return await update.message.reply_text("📊 No referral data available yet.")
+        return await edit_or_reply(update, "📊 No referral data yet.", reply_markup=back_home())
     lines = ["🏆 *Top Referrers:*\n"]
     for i, m in enumerate(top, 1):
         uname = f"@{m['username']}" if m.get("username") else m.get("full_name", "?")
         badge = m.get("badge") or ""
         count = m.get("referral_count", 0)
         lines.append(f"{i}. {uname} — {count} referrals {badge}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FEATURE 3 — BUY/SELL LISTINGS
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── SELL Conversation ──────────────────────────────────────────────────────
+# ── SELL Conversation ─────────────────────────────────────────────────────────
 
 async def sell_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await get_or_create_member(
@@ -742,16 +697,24 @@ async def sell_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update.effective_user.username or "",
         update.effective_user.full_name or "",
     )
-    await update.message.reply_text(
-        "🛒 *Create a Sell Listing!*\n\nWhat is the tool name? (e.g. ChatGPT Plus, Canva Pro)",
-        parse_mode="Markdown",
-    )
+    target = update.effective_message or (update.callback_query and update.callback_query.message)
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(
+            "🛒 *Create a Sell Listing!*\n\nWhat is the tool name? (e.g. ChatGPT Plus, Canva Pro)",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            "🛒 *Create a Sell Listing!*\n\nWhat is the tool name? (e.g. ChatGPT Plus, Canva Pro)",
+            parse_mode="Markdown",
+        )
     return SELL_NAME
 
 
 async def sell_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["sell_tool_name"] = update.message.text.strip()
-    await update.message.reply_text("💰 What is the price? (in your currency, e.g. 500 or 400-600)")
+    await update.message.reply_text("💰 What is the price? (e.g. 500 or 400-600)")
     return SELL_PRICE
 
 
@@ -766,20 +729,18 @@ async def sell_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def sell_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["sell_description"] = update.message.text.strip()
     await update.message.reply_text(
-        "📸 Send a screenshot or photo (optional).\nType /skip if you don't want to add one."
+        "📸 Send a screenshot or photo (optional).\nType /skip if you don't want one."
     )
     return SELL_PHOTO
 
 
 async def sell_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
     file_id = None
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
     elif update.message.document:
         file_id = update.message.document.file_id
-
-    await _finalize_sell(update, context, user, file_id)
+    await _finalize_sell(update, context, update.effective_user, file_id)
     return ConversationHandler.END
 
 
@@ -789,27 +750,23 @@ async def sell_skip_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _finalize_sell(update, context, user, file_id):
-    tool_name = context.user_data.get("sell_tool_name", "")
-    price = context.user_data.get("sell_price", "")
+    tool_name   = context.user_data.get("sell_tool_name", "")
+    price       = context.user_data.get("sell_price", "")
     description = context.user_data.get("sell_description", "")
 
     listing = await create_listing(
-        user_id=user.id,
-        username=user.username or "",
-        type_="sell",
-        tool_name=tool_name,
-        price=price,
-        description=description,
-        file_id=file_id,
+        user_id=user.id, username=user.username or "",
+        type_="sell", tool_name=tool_name,
+        price=price, description=description, file_id=file_id,
     )
     if not listing:
         await update.message.reply_text("❌ Failed to create listing. Please try again.")
         return
 
-    member = await get_member(user.id)
-    verified_badge = "✅" if member and member.get("is_verified") else ""
-    date_str = datetime.now(IST).strftime("%d %b %Y")
-    username_str = f"@{user.username}" if user.username else user.full_name
+    member       = await get_member(user.id)
+    verified_tag = "✅" if member and member.get("is_verified") else ""
+    date_str     = datetime.now(IST).strftime("%d %b %Y")
+    uname_str    = f"@{user.username}" if user.username else user.full_name
 
     card = (
         "🔥 *NEW LISTING — SELL*\n"
@@ -818,39 +775,32 @@ async def _finalize_sell(update, context, user, file_id):
         f"💰 Price: ₹{price}\n"
         f"📝 {description}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 Seller: {username_str} {verified_badge}\n"
+        f"👤 Seller: {uname_str} {verified_tag}\n"
         f"📅 Posted: {date_str}\n"
         f"🆔 Listing ID: #{listing['id']}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "DM the seller to start a deal! 🤝"
     )
-
     try:
         if file_id:
-            await context.bot.send_photo(
-                chat_id=GROUP_ID,
-                photo=file_id,
-                caption=card,
-                parse_mode="Markdown",
-            )
+            await context.bot.send_photo(chat_id=GROUP_ID, photo=file_id, caption=card, parse_mode="Markdown")
         else:
-            await context.bot.send_message(
-                chat_id=GROUP_ID,
-                text=card,
-                parse_mode="Markdown",
-            )
-        await update.message.reply_text(f"✅ Listing posted successfully! ID: #{listing['id']}")
+            await context.bot.send_message(chat_id=GROUP_ID, text=card, parse_mode="Markdown")
+        await update.message.reply_text(
+            f"✅ Listing posted! ID: #{listing['id']}",
+            reply_markup=back_home(),
+        )
     except TelegramError as e:
         logger.error(f"Post sell listing error: {e}")
         await update.message.reply_text("❌ Failed to post in group. Please try again.")
 
 
 async def sell_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Sell listing cancelled.")
+    await update.message.reply_text("❌ Sell listing cancelled.", reply_markup=back_home())
     return ConversationHandler.END
 
 
-# ── BUY Conversation ───────────────────────────────────────────────────────
+# ── BUY Conversation ──────────────────────────────────────────────────────────
 
 async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await get_or_create_member(
@@ -858,10 +808,17 @@ async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update.effective_user.username or "",
         update.effective_user.full_name or "",
     )
-    await update.message.reply_text(
-        "🛍️ *Create a Buy Request!*\n\nWhich tool are you looking for? (e.g. Adobe CC, Midjourney)",
-        parse_mode="Markdown",
-    )
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(
+            "🛍️ *Create a Buy Request!*\n\nWhich tool are you looking for? (e.g. Adobe CC, Midjourney)",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            "🛍️ *Create a Buy Request!*\n\nWhich tool are you looking for? (e.g. Adobe CC, Midjourney)",
+            parse_mode="Markdown",
+        )
     return BUY_NAME
 
 
@@ -893,24 +850,21 @@ async def buy_skip_req(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _finalize_buy(update, context, requirement):
-    user = update.effective_user
+    user      = update.effective_user
     tool_name = context.user_data.get("buy_tool_name", "")
-    budget = context.user_data.get("buy_budget", "")
+    budget    = context.user_data.get("buy_budget", "")
 
     listing = await create_listing(
-        user_id=user.id,
-        username=user.username or "",
-        type_="buy",
-        tool_name=tool_name,
-        price=budget,
-        description=requirement,
+        user_id=user.id, username=user.username or "",
+        type_="buy", tool_name=tool_name,
+        price=budget, description=requirement,
     )
     if not listing:
         await update.message.reply_text("❌ Failed to create buy request. Please try again.")
         return
 
-    date_str = datetime.now(IST).strftime("%d %b %Y")
-    username_str = f"@{user.username}" if user.username else user.full_name
+    date_str  = datetime.now(IST).strftime("%d %b %Y")
+    uname_str = f"@{user.username}" if user.username else user.full_name
 
     card = (
         "🛍️ *BUY REQUEST*\n"
@@ -919,64 +873,96 @@ async def _finalize_buy(update, context, requirement):
         f"💰 Budget: ₹{budget}\n"
         f"📋 Requirement: {requirement}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 Buyer: {username_str}\n"
+        f"👤 Buyer: {uname_str}\n"
         f"📅 Posted: {date_str}\n"
         f"🆔 Request ID: #{listing['id']}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "If you have this tool, DM the buyer! 💬"
     )
-
     try:
         await context.bot.send_message(chat_id=GROUP_ID, text=card, parse_mode="Markdown")
-        await update.message.reply_text(f"✅ Buy request posted successfully! ID: #{listing['id']}")
+        await update.message.reply_text(
+            f"✅ Buy request posted! ID: #{listing['id']}",
+            reply_markup=back_home(),
+        )
     except TelegramError as e:
         logger.error(f"Post buy listing error: {e}")
         await update.message.reply_text("❌ Failed to post in group. Please try again.")
 
 
 async def buy_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Buy request cancelled.")
+    await update.message.reply_text("❌ Buy request cancelled.", reply_markup=back_home())
     return ConversationHandler.END
 
 
-# ── Search / Manage ────────────────────────────────────────────────────────
+# ── Search Conversation ───────────────────────────────────────────────────────
+
+async def search_start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry from 🔍 Search inline button."""
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text(
+        "🔍 *Search Listings*\n\nType a keyword (e.g. ChatGPT, Canva, Adobe):",
+        parse_mode="Markdown",
+    )
+    return SEARCH_QUERY
+
+
+async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyword = update.message.text.strip()
+    results = await search_listings(keyword)
+    if not results:
+        await update.message.reply_text(
+            f"🔍 No listings found for *'{keyword}'*.",
+            parse_mode="Markdown",
+            reply_markup=back_home(),
+        )
+        return ConversationHandler.END
+
+    lines = [f"🔍 *Search Results for '{keyword}':*\n"]
+    for r in results[:10]:
+        t     = "🔥 SELL" if r["type"] == "sell" else "🛍️ BUY"
+        uname = f"@{r['username']}" if r.get("username") else "?"
+        lines.append(f"• {t} | {r['tool_name']} | ₹{r.get('price', '?')} | {uname} | #ID{r['id']}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
+    return ConversationHandler.END
+
+
+async def search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Search cancelled.", reply_markup=back_home())
+    return ConversationHandler.END
+
+
+# ── Search / Manage (command-based) ──────────────────────────────────────────
 
 async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search listings by keyword."""
     if not context.args:
         return await update.message.reply_text("Usage: /search <keyword>")
     keyword = " ".join(context.args)
     results = await search_listings(keyword)
     if not results:
         return await update.message.reply_text(f"🔍 No listings found for '{keyword}'.")
-
     lines = [f"🔍 *Search Results for '{keyword}':*\n"]
     for r in results[:10]:
-        t = "🔥 SELL" if r["type"] == "sell" else "🛍️ BUY"
+        t     = "🔥 SELL" if r["type"] == "sell" else "🛍️ BUY"
         uname = f"@{r['username']}" if r.get("username") else "?"
-        lines.append(
-            f"• {t} | {r['tool_name']} | ₹{r.get('price', '?')} | {uname} | #ID{r['id']}"
-        )
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        lines.append(f"• {t} | {r['tool_name']} | ₹{r.get('price', '?')} | {uname} | #ID{r['id']}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
 
 
 async def mylistings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user's active listings."""
-    user = update.effective_user
+    user     = update.effective_user
     listings = await get_user_listings(user.id)
     if not listings:
-        return await update.message.reply_text("📋 You have no active listings.")
-
+        return await edit_or_reply(update, "📋 You have no active listings.", reply_markup=back_home())
     lines = ["📋 *Your Active Listings:*\n"]
     for r in listings:
         t = "🔥 SELL" if r["type"] == "sell" else "🛍️ BUY"
         lines.append(f"• #{r['id']} | {t} | {r['tool_name']} | {r.get('price', '?')}")
-    lines.append("\nTo remove a listing: /delist <id>")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    lines.append("\nTo remove: `/delist <id>`")
+    await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
 
 
 async def delist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delist a listing."""
     if not context.args:
         return await update.message.reply_text("Usage: /delist <listing_id>")
     try:
@@ -985,42 +971,9 @@ async def delist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ Please provide a valid listing ID.")
     ok = await delist_listing(listing_id, update.effective_user.id)
     if ok:
-        await update.message.reply_text(f"✅ Listing #{listing_id} has been removed.")
+        await update.message.reply_text(f"✅ Listing #{listing_id} removed.", reply_markup=back_home())
     else:
         await update.message.reply_text("❌ Listing not found or it doesn't belong to you.")
-
-
-# ── Search Conversation (button-triggered) ────────────────────────────────
-
-async def search_button_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Triggered by 🔍 Search keyboard button."""
-    await update.message.reply_text(
-        "🔍 *Search Listings*\n\nType a keyword to search (e.g. ChatGPT, Canva, Adobe):",
-        parse_mode="Markdown",
-    )
-    return SEARCH_QUERY
-
-
-async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle search keyword input after button press."""
-    keyword = update.message.text.strip()
-    results = await search_listings(keyword)
-    if not results:
-        await update.message.reply_text(f"🔍 No listings found for *'{keyword}'*.", parse_mode="Markdown")
-        return ConversationHandler.END
-
-    lines = [f"🔍 *Search Results for '{keyword}':*\n"]
-    for r in results[:10]:
-        t = "🔥 SELL" if r["type"] == "sell" else "🛍️ BUY"
-        uname = f"@{r['username']}" if r.get("username") else "?"
-        lines.append(f"• {t} | {r['tool_name']} | ₹{r.get('price', '?')} | {uname} | #ID{r['id']}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-    return ConversationHandler.END
-
-
-async def search_conv_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Search cancelled.")
-    return ConversationHandler.END
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1028,9 +981,8 @@ async def search_conv_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: ban a user."""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
+        return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
         return await update.message.reply_text("Usage: /ban @username or reply to a message")
@@ -1039,13 +991,12 @@ async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔨 {target_name} has been banned!")
         await update_member(target_id, is_banned=True)
     except TelegramError as e:
-        await update.message.reply_text(f"❌ Error banning user: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
 
 
 async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: /mute @user <minutes>"""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
+        return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
         return await update.message.reply_text("Usage: /mute @username <minutes>")
@@ -1057,20 +1008,16 @@ async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
     try:
         await context.bot.restrict_chat_member(
-            chat_id=GROUP_ID,
-            user_id=target_id,
-            permissions=MUTED,
-            until_date=until,
+            chat_id=GROUP_ID, user_id=target_id, permissions=MUTED, until_date=until,
         )
-        await update.message.reply_text(f"🔇 {target_name} has been muted for {minutes} minutes!")
+        await update.message.reply_text(f"🔇 {target_name} muted for {minutes} minutes!")
     except TelegramError as e:
-        await update.message.reply_text(f"❌ Error muting user: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
 
 
 async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: warn a user. Auto-ban at WARNING_LIMIT."""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
+        return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
         return await update.message.reply_text("Usage: /warn @username or reply to a message")
@@ -1082,28 +1029,23 @@ async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.ban_chat_member(chat_id=GROUP_ID, user_id=target_id)
             await update_member(target_id, is_banned=True)
-            await update.message.reply_text(
-                f"⚠️ {target_name} reached {new_count} warnings — auto-banned! 🔨"
-            )
+            await update.message.reply_text(f"⚠️ {target_name} reached {new_count} warnings — auto-banned! 🔨")
         except TelegramError as e:
             await update.message.reply_text(f"❌ Auto-ban error: {e}")
     else:
-        await update.message.reply_text(
-            f"⚠️ Warning issued to {target_name}! ({new_count}/{WARNING_LIMIT})"
-        )
+        await update.message.reply_text(f"⚠️ Warning issued to {target_name}! ({new_count}/{WARNING_LIMIT})")
         try:
             await context.bot.send_message(
                 chat_id=target_id,
-                text=f"⚠️ You have received a warning in the group! ({new_count}/{WARNING_LIMIT})\n{WARNING_LIMIT} warnings = auto-ban!",
+                text=f"⚠️ You received a warning! ({new_count}/{WARNING_LIMIT})\n{WARNING_LIMIT} warnings = auto-ban!",
             )
         except TelegramError:
             pass
 
 
 async def warnings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: show warning count for a user."""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
+        return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
         return await update.message.reply_text("Usage: /warnings @username or reply to a message")
@@ -1112,43 +1054,42 @@ async def warnings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: group stats."""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
+        return await update.message.reply_text("❌ Admins only.")
     stats = await get_group_stats()
-    await update.message.reply_text(
+    await edit_or_reply(
+        update,
         f"📊 *Group Stats*\n\n"
         f"👥 Total Members: {stats['total_members']}\n"
         f"📦 Listings Today: {stats['listings_today']}\n"
         f"🆕 New Joins Today: {stats['new_joins_today']}",
         parse_mode="Markdown",
+        reply_markup=admin_panel_kb(),
     )
 
 
 async def addword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: add scam word."""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
+        return await update.message.reply_text("❌ Admins only.")
     if not context.args:
         return await update.message.reply_text("Usage: /addword <word>")
     word = " ".join(context.args).lower()
-    ok = await add_scam_word(word, update.effective_user.id)
+    ok   = await add_scam_word(word, update.effective_user.id)
     if ok:
         words = await get_scam_words()
         context.bot_data["scam_words_cache"] = words
         await update.message.reply_text(f"✅ Scam word added: '{word}'")
     else:
-        await update.message.reply_text(f"⚠️ Word already exists or an error occurred: '{word}'")
+        await update.message.reply_text(f"⚠️ Word already exists or error: '{word}'")
 
 
 async def removeword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: remove scam word."""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
+        return await update.message.reply_text("❌ Admins only.")
     if not context.args:
         return await update.message.reply_text("Usage: /removeword <word>")
     word = " ".join(context.args).lower()
-    ok = await remove_scam_word(word)
+    ok   = await remove_scam_word(word)
     if ok:
         words = await get_scam_words()
         context.bot_data["scam_words_cache"] = words
@@ -1158,35 +1099,33 @@ async def removeword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def announce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: DM all members."""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
+        return await update.message.reply_text("❌ Admins only.")
     if not context.args:
         return await update.message.reply_text("Usage: /announce <message>")
     message = " ".join(context.args)
     members = await get_all_members()
-    await update.message.reply_text(f"📢 Sending announcement to {len(members)} members...")
+    await update.message.reply_text(f"📢 Sending to {len(members)} members...")
 
     sent, failed = 0, 0
     for m in members:
         try:
             await context.bot.send_message(
                 chat_id=m["user_id"],
-                text=f"📢 *Group Announcement:*\n\n{message}",
+                text=f"📢 *Announcement:*\n\n{message}",
                 parse_mode="Markdown",
             )
             sent += 1
         except TelegramError:
             failed += 1
-        await asyncio.sleep(0.05)  # Avoid hitting rate limits
+        await asyncio.sleep(0.05)
 
-    await update.message.reply_text(f"✅ Announcement sent! Delivered: {sent}, Failed: {failed}")
+    await update.message.reply_text(f"✅ Done! Delivered: {sent} | Failed: {failed}")
 
 
 async def sellercard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: manually post seller card."""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
+        return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
         return await update.message.reply_text("Usage: /sellercard @username or reply to a message")
@@ -1194,76 +1133,13 @@ async def sellercard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def admin_panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show admin panel inline keyboard."""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📊 Group Stats", callback_data="adm_stats"),
-            InlineKeyboardButton("📢 Announce", callback_data="adm_announce_info"),
-        ],
-        [
-            InlineKeyboardButton("🔨 Ban User", callback_data="adm_ban_info"),
-            InlineKeyboardButton("🔇 Mute User", callback_data="adm_mute_info"),
-        ],
-        [
-            InlineKeyboardButton("⚠️ Warn User", callback_data="adm_warn_info"),
-            InlineKeyboardButton("✅ Approve Seller", callback_data="adm_approve_info"),
-        ],
-        [
-            InlineKeyboardButton("🚫 Scam Words", callback_data="adm_scamwords"),
-            InlineKeyboardButton("🏅 Set Badge", callback_data="adm_badge_info"),
-        ],
-        [
-            InlineKeyboardButton("🃏 Seller Card", callback_data="adm_sellercard_info"),
-        ],
-    ])
+        return await update.message.reply_text("❌ Admins only.")
     await update.message.reply_text(
-        "⚙️ *Admin Panel*\n\nTap a button for quick help or use commands directly:",
+        "⚙️ *Admin Panel*",
         parse_mode="Markdown",
-        reply_markup=keyboard,
+        reply_markup=admin_panel_kb(),
     )
-
-
-async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle admin panel inline button presses."""
-    query = update.callback_query
-    await query.answer()
-
-    if not await is_admin(query.from_user.id, context):
-        await query.answer("Admins only!", show_alert=True)
-        return
-
-    responses = {
-        "adm_announce_info": "📢 *Announce*\nUsage: `/announce <message>`\nSends a DM to all registered members.",
-        "adm_ban_info": "🔨 *Ban User*\nUsage: `/ban @username` or reply to message.",
-        "adm_mute_info": "🔇 *Mute User*\nUsage: `/mute @username <minutes>`\nDefault: 10 minutes.",
-        "adm_warn_info": "⚠️ *Warn User*\nUsage: `/warn @username`\nAuto-bans at warning limit.",
-        "adm_approve_info": "✅ *Approve Seller*\nUsage: `/approve @username`\nGrants verified seller badge.",
-        "adm_badge_info": "🏅 *Set Badge*\nUsage: `/setbadge <count> <name> [admin]`\nExample: `/setbadge 5 Star Seller`",
-        "adm_sellercard_info": "🃏 *Seller Card*\nUsage: `/sellercard @username`\nPosts a spotlight card in the group.",
-    }
-
-    if query.data == "adm_stats":
-        stats = await get_group_stats()
-        text = (
-            "📊 *Group Stats*\n\n"
-            f"👥 Total Members: {stats['total_members']}\n"
-            f"📦 Listings Today: {stats['listings_today']}\n"
-            f"🆕 New Joins Today: {stats['new_joins_today']}"
-        )
-        await query.message.reply_text(text, parse_mode="Markdown")
-        return
-
-    if query.data == "adm_scamwords":
-        words = context.bot_data.get("scam_words_cache", [])
-        word_list = ", ".join(words) if words else "None added yet"
-        text = f"🚫 *Scam Filter Words:*\n`{word_list}`\n\nAdd: `/addword <word>`\nRemove: `/removeword <word>`"
-        await query.message.reply_text(text, parse_mode="Markdown")
-        return
-
-    text = responses.get(query.data, "ℹ️ No info available.")
-    await query.message.reply_text(text, parse_mode="Markdown")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1271,7 +1147,6 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def daily_morning_post(context: ContextTypes.DEFAULT_TYPE):
-    """9 AM IST — morning message + housekeeping."""
     await expire_old_listings()
     await cancel_expired_deals()
     sell_count, buy_count = await get_active_listing_counts()
@@ -1292,8 +1167,7 @@ async def daily_morning_post(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def weekly_leaderboard_post(context: ContextTypes.DEFAULT_TYPE):
-    """Sunday 6 PM IST — leaderboard post."""
-    top_trust = await get_top_by_trust(10)
+    top_trust   = await get_top_by_trust(10)
     top_sellers = await get_top_sellers_by_rating(10)
 
     lines = ["🏆 *Weekly Leaderboard — Top Trusted Sellers!* 🏆\n"]
@@ -1305,16 +1179,14 @@ async def weekly_leaderboard_post(context: ContextTypes.DEFAULT_TYPE):
 
     lines.append("\n⭐ *Top Rated Sellers:*\n")
     for i, m in enumerate(top_sellers, 1):
-        uname = f"@{m['username']}" if m.get("username") else m.get("full_name", "?")
+        uname    = f"@{m['username']}" if m.get("username") else m.get("full_name", "?")
         verified = "✅" if m.get("is_verified") else ""
-        rating = m.get("avg_rating", 0)
+        rating   = m.get("avg_rating", 0)
         lines.append(f"{i}. {uname} {verified} — ⭐ {rating}/5")
 
     try:
         await context.bot.send_message(
-            chat_id=GROUP_ID,
-            text="\n".join(lines),
-            parse_mode="Markdown",
+            chat_id=GROUP_ID, text="\n".join(lines), parse_mode="Markdown",
         )
     except TelegramError as e:
         logger.error(f"Weekly leaderboard error: {e}")
@@ -1325,57 +1197,50 @@ async def weekly_leaderboard_post(context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def verify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User requests verification."""
-    user = update.effective_user
+    user   = update.effective_user
     member = await get_or_create_member(user.id, user.username or "", user.full_name or "")
     if member and member.get("is_verified"):
-        return await update.message.reply_text("✅ You are already a verified seller!")
+        return await edit_or_reply(
+            update, "✅ You are already a verified seller!", reply_markup=back_home()
+        )
 
-    username_str = f"@{user.username}" if user.username else user.full_name
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Approve", callback_data=f"verify_approve_{user.id}"),
-            InlineKeyboardButton("❌ Reject", callback_data=f"verify_reject_{user.id}"),
-        ]
-    ])
-
+    uname_str = f"@{user.username}" if user.username else user.full_name
     for admin_id in ADMIN_IDS:
         try:
             await context.bot.send_message(
                 chat_id=admin_id,
                 text=(
                     f"🔔 *Verification Request!*\n\n"
-                    f"👤 User: {username_str}\n"
-                    f"🆔 ID: {user.id}\n\n"
-                    f"Please approve or reject this request:"
+                    f"👤 User: {uname_str}\n"
+                    f"🆔 ID: {user.id}"
                 ),
                 parse_mode="Markdown",
-                reply_markup=keyboard,
+                reply_markup=verify_admin_kb(user.id),
             )
         except TelegramError:
             pass
 
-    await update.message.reply_text(
-        "✅ Your verification request has been sent to admins! Please wait for approval. 🙏"
+    await edit_or_reply(
+        update,
+        "✅ Your verification request has been sent to admins! Please wait. 🙏",
+        reply_markup=back_home(),
     )
 
 
 async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle approve/reject verification callbacks."""
     query = update.callback_query
     await query.answer()
     admin = query.from_user
 
     if admin.id not in ADMIN_IDS and not await is_admin(admin.id, context):
-        await query.answer("Only admins can approve or reject verification requests!", show_alert=True)
+        await query.answer("Admins only!", show_alert=True)
         return
 
-    data = query.data
-    parts = data.split("_")
+    parts = query.data.split("_")
     if len(parts) < 3:
         return
 
-    action = parts[1]
+    action         = parts[1]
     target_user_id = int(parts[2])
 
     if action == "approve":
@@ -1384,23 +1249,23 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=target_user_id,
-                    text="🎉 Congratulations! Your verification has been approved! You are now a *Verified Seller*! ✅",
+                    text="🎉 Congratulations! You are now a *Verified Seller*! ✅",
                     parse_mode="Markdown",
                 )
                 await context.bot.send_message(
                     chat_id=GROUP_ID,
-                    text=f"🎊 A new Verified Seller has joined the community! Welcome them! ✅",
+                    text="🎊 A new Verified Seller has joined the community! ✅",
                 )
             except TelegramError:
                 pass
-            await query.edit_message_text(f"✅ User {target_user_id} has been verified!")
+            await query.edit_message_text(f"✅ User {target_user_id} verified!")
         else:
-            await query.edit_message_text("❌ Verification failed. Please try again.")
+            await query.edit_message_text("❌ Verification failed.")
     elif action == "reject":
         try:
             await context.bot.send_message(
                 chat_id=target_user_id,
-                text="❌ Your verification request has been rejected. Please contact an admin for more details.",
+                text="❌ Your verification request has been rejected. Contact an admin for details.",
             )
         except TelegramError:
             pass
@@ -1408,24 +1273,22 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def verified_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List all verified sellers."""
     sellers = await get_verified_sellers()
     if not sellers:
-        return await update.message.reply_text("✅ No verified sellers yet.")
+        return await edit_or_reply(update, "✅ No verified sellers yet.", reply_markup=back_home())
     lines = ["✅ *Verified Sellers:*\n"]
     for s in sellers:
-        uname = f"@{s['username']}" if s.get("username") else s.get("full_name", "?")
-        badge = s.get("badge") or ""
+        uname  = f"@{s['username']}" if s.get("username") else s.get("full_name", "?")
+        badge  = s.get("badge") or ""
         rating = s.get("avg_rating", 0)
-        deals = s.get("total_deals", 0)
+        deals  = s.get("total_deals", 0)
         lines.append(f"• {uname} {badge} | ⭐ {rating}/5 | 📦 {deals} deals")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
 
 
 async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: /approve @username — set verified."""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
+        return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
         return await update.message.reply_text("Usage: /approve @username or reply to a message")
@@ -1434,33 +1297,29 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=target_id,
-                text="🎉 Congratulations! Your verification has been approved! You are now a *Verified Seller*! ✅",
+                text="🎉 You are now a *Verified Seller*! ✅",
                 parse_mode="Markdown",
             )
-            await context.bot.send_message(
-                chat_id=GROUP_ID,
-                text=f"🎊 {target_name} is now a Verified Seller! ✅",
-            )
+            await context.bot.send_message(chat_id=GROUP_ID, text=f"🎊 {target_name} is now a Verified Seller! ✅")
         except TelegramError:
             pass
-        await update.message.reply_text(f"✅ {target_name} has been verified!")
+        await update.message.reply_text(f"✅ {target_name} verified!")
     else:
-        await update.message.reply_text("❌ Verification failed. Please try again.")
+        await update.message.reply_text("❌ Verification failed.")
 
 
 async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: /reject @username <reason>"""
     if not await is_admin(update.effective_user.id, context):
-        return await update.message.reply_text("❌ This command is for admins only.")
+        return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
         return await update.message.reply_text("Usage: /reject @username <reason>")
     reason_args = context.args[1:] if context.args else []
-    reason = " ".join(reason_args) if reason_args else "No reason provided."
+    reason      = " ".join(reason_args) if reason_args else "No reason provided."
     try:
         await context.bot.send_message(
             chat_id=target_id,
-            text=f"❌ Your verification request has been rejected.\n\n📋 Reason: {reason}",
+            text=f"❌ Verification rejected.\n\n📋 Reason: {reason}",
         )
     except TelegramError:
         pass
@@ -1472,27 +1331,25 @@ async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def review_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/review @seller <rating 1-5> <comment>"""
     user = update.effective_user
     args = context.args
     if not args or len(args) < 3:
         return await update.message.reply_text(
-            "Usage: /review @seller <rating 1-5> <comment>\nExample: /review @john 5 Great seller, fast delivery!"
+            "Usage: /review @seller <rating 1-5> <comment>\nExample: /review @john 5 Great seller!"
         )
 
     seller_username = args[0].lstrip("@")
     try:
         rating = int(args[1])
     except ValueError:
-        return await update.message.reply_text("❌ Rating must be between 1 and 5.")
+        return await update.message.reply_text("❌ Rating must be 1–5.")
     if not 1 <= rating <= 5:
-        return await update.message.reply_text("❌ Rating must be between 1 and 5.")
+        return await update.message.reply_text("❌ Rating must be 1–5.")
 
     comment = " ".join(args[2:])
-
-    seller = await get_member_by_username(seller_username)
+    seller  = await get_member_by_username(seller_username)
     if not seller:
-        return await update.message.reply_text(f"❌ Could not find profile for @{seller_username}.")
+        return await update.message.reply_text(f"❌ Profile not found for @{seller_username}.")
     seller_id = seller["user_id"]
 
     if seller_id == user.id:
@@ -1500,14 +1357,16 @@ async def review_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     review, status = await add_review(user.id, seller_id, rating, comment)
     if status == "already_reviewed":
-        return await update.message.reply_text("⚠️ You have already reviewed this seller.")
+        return await update.message.reply_text("⚠️ You already reviewed this seller.")
     if status == "error" or not review:
-        return await update.message.reply_text("❌ Failed to submit review. Please try again.")
+        return await update.message.reply_text("❌ Failed to submit review.")
 
     stars = "⭐" * rating
-    await update.message.reply_text(f"✅ Review submitted!\n{stars} ({rating}/5)\n📝 {comment}")
+    await update.message.reply_text(
+        f"✅ Review submitted!\n{stars} ({rating}/5)\n📝 {comment}",
+        reply_markup=back_home(),
+    )
 
-    # Check for low rating alert
     avg, count = await get_seller_avg_rating(seller_id)
     if avg < LOW_RATING_THRESHOLD and count >= LOW_RATING_MIN_REVIEWS:
         for admin_id in ADMIN_IDS:
@@ -1517,8 +1376,7 @@ async def review_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=(
                         f"🚨 *Low Rating Alert!*\n\n"
                         f"Seller: @{seller.get('username', seller_id)}\n"
-                        f"Avg Rating: {avg}/5 ({count} reviews)\n"
-                        f"Please review this seller's activity."
+                        f"Avg Rating: {avg}/5 ({count} reviews)"
                     ),
                     parse_mode="Markdown",
                 )
@@ -1527,69 +1385,66 @@ async def review_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/profile or /profile @username"""
     user = update.effective_user
     if context.args:
         username = context.args[0].lstrip("@")
-        member = await get_member_by_username(username)
+        member   = await get_member_by_username(username)
         if not member:
-            return await update.message.reply_text(f"❌ Profile not found for @{username}.")
+            return await edit_or_reply(update, f"❌ Profile not found for @{username}.", reply_markup=back_home())
     else:
         member = await get_or_create_member(user.id, user.username or "", user.full_name or "")
 
-    await send_profile_card(update.message, member)
+    await _send_profile_card(update, member)
 
 
-async def send_profile_card(message, member: dict):
-    """Send formatted profile card."""
-    avg, count = await get_seller_avg_rating(member["user_id"])
-    reviews = await get_seller_reviews(member["user_id"], 3)
-
-    uname = f"@{member['username']}" if member.get("username") else member.get("full_name", "?")
-    verified = "✅ Yes" if member.get("is_verified") else "❌ No"
-    badge = member.get("badge") or "—"
-    trust = member.get("trust_count", 0)
-    total_deals = member.get("total_deals", 0)
-    warnings = member.get("warnings", 0)
-    stars = "⭐" * round(avg) if avg else "No rating"
+async def _send_profile_card(update: Update, member: dict):
+    avg, count   = await get_seller_avg_rating(member["user_id"])
+    reviews      = await get_seller_reviews(member["user_id"], 3)
+    uname        = f"@{member['username']}" if member.get("username") else member.get("full_name", "?")
+    verified     = "✅ Yes" if member.get("is_verified") else "❌ No"
+    badge        = member.get("badge") or "—"
+    trust        = member.get("trust_count", 0)
+    total_deals  = member.get("total_deals", 0)
+    warnings     = member.get("warnings", 0)
+    stars        = "⭐" * round(avg) if avg else "No rating"
 
     text = (
         f"👤 *Profile: {uname}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"✅ Verified: {verified}\n"
         f"🏆 Badge: {badge}\n"
         f"⭐ Rating: {avg}/5 ({count} reviews) {stars}\n"
         f"📦 Total Deals: {total_deals}\n"
         f"👍 Trust Votes: {trust}\n"
         f"⚠️ Warnings: {warnings}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
     )
-
     if reviews:
         text += "📋 *Recent Reviews:*\n"
         for r in reviews:
             s = "⭐" * r["rating"]
             text += f"{s} — {r.get('comment', '')[:80]}\n"
 
-    await message.reply_text(text, parse_mode="Markdown")
+    await edit_or_reply(update, text, parse_mode="Markdown", reply_markup=back_home())
 
 
 async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle profile_{seller_id} callback."""
-    query = update.callback_query
+    query     = update.callback_query
     await query.answer()
     seller_id = int(query.data.split("_")[1])
-    member = await get_member(seller_id)
+    member    = await get_member(seller_id)
     if not member:
         await query.answer("Profile not found!", show_alert=True)
         return
-    avg, count = await get_seller_avg_rating(seller_id)
-    reviews = await get_seller_reviews(seller_id, 3)
-    uname = f"@{member['username']}" if member.get("username") else member.get("full_name", "?")
-    verified = "✅ Yes" if member.get("is_verified") else "❌ No"
-    badge = member.get("badge") or "—"
-    trust = member.get("trust_count", 0)
+
+    avg, count  = await get_seller_avg_rating(seller_id)
+    reviews     = await get_seller_reviews(seller_id, 3)
+    uname       = f"@{member['username']}" if member.get("username") else member.get("full_name", "?")
+    verified    = "✅ Yes" if member.get("is_verified") else "❌ No"
+    badge       = member.get("badge") or "—"
+    trust       = member.get("trust_count", 0)
     total_deals = member.get("total_deals", 0)
+
     text = (
         f"👤 *Profile: {uname}*\n"
         f"✅ Verified: {verified}\n"
@@ -1603,26 +1458,26 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for r in reviews:
             s = "⭐" * r["rating"]
             text += f"{s} {r.get('comment', '')[:60]}\n"
+
     try:
-        await query.message.reply_text(text, parse_mode="Markdown")
+        await query.message.reply_text(text, parse_mode="Markdown", reply_markup=back_home())
     except TelegramError:
         pass
 
 
 async def topsellers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Top 10 sellers by avg rating."""
     sellers = await get_top_sellers_by_rating(10)
     if not sellers:
-        return await update.message.reply_text("⭐ No review data available yet.")
+        return await edit_or_reply(update, "⭐ No review data yet.", reply_markup=back_home())
     lines = ["⭐ *Top Sellers by Rating:*\n"]
     for i, s in enumerate(sellers, 1):
-        uname = f"@{s['username']}" if s.get("username") else s.get("full_name", "?")
+        uname    = f"@{s['username']}" if s.get("username") else s.get("full_name", "?")
         verified = "✅" if s.get("is_verified") else ""
-        badge = s.get("badge") or ""
-        rating = s.get("avg_rating", 0)
-        deals = s.get("total_deals", 0)
+        badge    = s.get("badge") or ""
+        rating   = s.get("avg_rating", 0)
+        deals    = s.get("total_deals", 0)
         lines.append(f"{i}. {uname} {verified} {badge} | ⭐ {rating}/5 | 📦 {deals} deals")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1630,14 +1485,13 @@ async def topsellers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def deal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/deal @buyer @seller <amount> [tool_name]"""
     args = context.args
     if not args or len(args) < 3:
         return await update.message.reply_text(
-            "Usage: /deal @buyer @seller <amount> [tool_name]\nExample: /deal @alice @bob 500 ChatGPT"
+            "Usage: /deal @buyer @seller <amount> [tool]\nExample: /deal @alice @bob 500 ChatGPT"
         )
 
-    buyer_username = args[0].lstrip("@")
+    buyer_username  = args[0].lstrip("@")
     seller_username = args[1].lstrip("@")
     try:
         amount = float(args[2])
@@ -1645,7 +1499,7 @@ async def deal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ Amount must be a number.")
     tool_name = " ".join(args[3:]) if len(args) > 3 else "Tool"
 
-    buyer = await get_member_by_username(buyer_username)
+    buyer  = await get_member_by_username(buyer_username)
     seller = await get_member_by_username(seller_username)
 
     if not buyer:
@@ -1655,23 +1509,9 @@ async def deal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     deal = await create_deal(buyer["user_id"], seller["user_id"], amount, tool_name)
     if not deal:
-        return await update.message.reply_text("❌ Failed to create deal. Please try again.")
+        return await update.message.reply_text("❌ Failed to create deal.")
 
     deal_id = deal["id"]
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Accept", callback_data=f"deal_accept_{deal_id}_{buyer['user_id']}"),
-            InlineKeyboardButton("❌ Decline", callback_data=f"deal_decline_{deal_id}_{buyer['user_id']}"),
-        ]
-    ])
-    keyboard_seller = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Accept", callback_data=f"deal_accept_{deal_id}_{seller['user_id']}"),
-            InlineKeyboardButton("❌ Decline", callback_data=f"deal_decline_{deal_id}_{seller['user_id']}"),
-        ]
-    ])
-
     msg = (
         f"🤝 *New Deal Proposal!*\n\n"
         f"🆔 Deal ID: #{deal_id}\n"
@@ -1679,36 +1519,30 @@ async def deal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 Amount: ₹{amount}\n"
         f"👤 Buyer: @{buyer_username}\n"
         f"🏪 Seller: @{seller_username}\n\n"
-        f"Both parties need to accept for the deal to go active!"
+        "Both parties must accept for the deal to go active!"
     )
 
     try:
         await context.bot.send_message(
-            chat_id=buyer["user_id"],
-            text=msg,
-            parse_mode="Markdown",
-            reply_markup=keyboard,
+            chat_id=buyer["user_id"], text=msg, parse_mode="Markdown",
+            reply_markup=deal_propose_kb(deal_id, buyer["user_id"]),
         )
     except TelegramError:
         pass
     try:
         await context.bot.send_message(
-            chat_id=seller["user_id"],
-            text=msg,
-            parse_mode="Markdown",
-            reply_markup=keyboard_seller,
+            chat_id=seller["user_id"], text=msg, parse_mode="Markdown",
+            reply_markup=deal_propose_kb(deal_id, seller["user_id"]),
         )
     except TelegramError:
         pass
 
-    await update.message.reply_text(f"✅ Deal #{deal_id} created! Both parties have been notified via DM.")
+    await update.message.reply_text(f"✅ Deal #{deal_id} created! Both parties notified via DM.")
 
-    # Initialize acceptance tracking
     if "deal_acceptances" not in context.bot_data:
         context.bot_data["deal_acceptances"] = {}
     context.bot_data["deal_acceptances"][deal_id] = set()
 
-    # Auto-cancel job
     context.job_queue.run_once(
         auto_cancel_deal,
         when=DEAL_TIMEOUT_HOURS * 3600,
@@ -1718,22 +1552,21 @@ async def deal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def deal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle deal accept/decline callbacks."""
     query = update.callback_query
     await query.answer()
-    user = query.from_user
-    data = query.data
+    user  = query.from_user
+    data  = query.data
     parts = data.split("_")
-    # deal_accept_{deal_id}_{user_id} or deal_decline_{deal_id}_{user_id}
+
     if len(parts) < 4:
         return
 
-    action = parts[1]
-    deal_id = int(parts[2])
+    action           = parts[1]
+    deal_id          = int(parts[2])
     expected_user_id = int(parts[3])
 
     if user.id != expected_user_id:
-        await query.answer("This deal does not belong to you!", show_alert=True)
+        await query.answer("This deal doesn't belong to you!", show_alert=True)
         return
 
     deal = await get_deal(deal_id)
@@ -1746,27 +1579,23 @@ async def deal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "decline":
         await update_deal(deal_id, status="cancelled")
-        # Cancel auto-cancel job
         for job in context.job_queue.get_jobs_by_name(f"auto_cancel_deal_{deal_id}"):
             job.schedule_removal()
-        await query.edit_message_text(f"❌ Deal #{deal_id} has been declined.")
-        # Notify other party
+        await query.edit_message_text(f"❌ Deal #{deal_id} declined.")
         other_id = deal["seller_id"] if user.id == deal["buyer_id"] else deal["buyer_id"]
         try:
-            await context.bot.send_message(chat_id=other_id, text=f"❌ Deal #{deal_id} has been declined by the other party.")
+            await context.bot.send_message(chat_id=other_id, text=f"❌ Deal #{deal_id} was declined.")
         except TelegramError:
             pass
         return
 
-    # Accept
     if "deal_acceptances" not in context.bot_data:
         context.bot_data["deal_acceptances"] = {}
     acceptances = context.bot_data["deal_acceptances"].setdefault(deal_id, set())
     acceptances.add(user.id)
 
-    await query.edit_message_text(f"✅ You have accepted Deal #{deal_id}! Waiting for the other party.")
+    await query.edit_message_text(f"✅ You accepted Deal #{deal_id}! Waiting for the other party.")
 
-    # Check if both accepted
     if deal["buyer_id"] in acceptances and deal["seller_id"] in acceptances:
         await update_deal(deal_id, status="active")
         context.bot_data["deal_acceptances"].pop(deal_id, None)
@@ -1778,7 +1607,7 @@ async def deal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🆔 Deal ID: #{deal_id}\n"
                     f"🛒 Tool: {deal['tool_name']}\n"
                     f"💰 Amount: {deal['amount']}\n\n"
-                    f"Both parties have agreed. Good luck! 🚀"
+                    "Both parties agreed. Good luck! 🚀"
                 ),
                 parse_mode="Markdown",
             )
@@ -1788,71 +1617,66 @@ async def deal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=uid,
-                    text=(
-                        f"✅ Deal #{deal_id} is now active!\n"
-                        f"Once the deal is done, use /dealcomplete {deal_id} to confirm."
-                    ),
+                    text=f"✅ Deal #{deal_id} is active!\nUse /dealcomplete {deal_id} once done.",
                 )
             except TelegramError:
                 pass
 
 
 async def auto_cancel_deal(context: ContextTypes.DEFAULT_TYPE):
-    """Auto-cancel deal after 24h if still pending."""
     deal_id = context.job.data["deal_id"]
-    deal = await get_deal(deal_id)
+    deal    = await get_deal(deal_id)
     if deal and deal["status"] == "pending":
         await update_deal(deal_id, status="cancelled")
         for uid in [deal["buyer_id"], deal["seller_id"]]:
             try:
                 await context.bot.send_message(
                     chat_id=uid,
-                    text=f"⏰ Deal #{deal_id} was automatically cancelled (24h timeout — no response).",
+                    text=f"⏰ Deal #{deal_id} auto-cancelled (24h timeout).",
                 )
             except TelegramError:
                 pass
 
 
 async def dealcomplete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/dealcomplete <deal_id>"""
     user = update.effective_user
     if not context.args:
         return await update.message.reply_text("Usage: /dealcomplete <deal_id>")
     try:
         deal_id = int(context.args[0])
     except ValueError:
-        return await update.message.reply_text("❌ Please provide a valid deal ID.")
+        return await update.message.reply_text("❌ Provide a valid deal ID.")
 
     deal = await get_deal(deal_id)
     if not deal:
         return await update.message.reply_text("❌ Deal not found.")
     if user.id not in [deal["buyer_id"], deal["seller_id"]]:
-        return await update.message.reply_text("❌ This deal does not belong to you.")
+        return await update.message.reply_text("❌ This deal doesn't belong to you.")
     if deal["status"] != "active":
-        return await update.message.reply_text(f"❌ Deal status is '{deal['status']}' — cannot complete.")
+        return await update.message.reply_text(f"❌ Deal status is '{deal['status']}'.")
 
     if "deal_confirmations" not in context.bot_data:
         context.bot_data["deal_confirmations"] = {}
     confirmations = context.bot_data["deal_confirmations"].setdefault(deal_id, set())
     confirmations.add(user.id)
 
-    await update.message.reply_text(f"✅ Your confirmation for Deal #{deal_id} has been recorded! Waiting for the other party.")
+    await update.message.reply_text(
+        f"✅ Confirmation recorded for Deal #{deal_id}! Waiting for the other party."
+    )
 
     if deal["buyer_id"] in confirmations and deal["seller_id"] in confirmations:
-        # Both confirmed
         context.bot_data["deal_confirmations"].pop(deal_id, None)
         from datetime import timezone as tz
-        await update_deal(deal_id, status="completed", completed_at=datetime.now(tz.utc).isoformat(),
-                         buyer_confirmed=True, seller_confirmed=True)
+        await update_deal(deal_id, status="completed",
+                          completed_at=datetime.now(tz.utc).isoformat(),
+                          buyer_confirmed=True, seller_confirmed=True)
         seller = await get_member(deal["seller_id"])
         new_total = (seller.get("total_deals", 0) if seller else 0) + 1
         await update_member(deal["seller_id"], total_deals=new_total)
 
-        # Cancel auto-cancel job if any
         for job in context.job_queue.get_jobs_by_name(f"auto_cancel_deal_{deal_id}"):
             job.schedule_removal()
 
-        # DM both for review
         seller_username = seller.get("username", "") if seller else ""
         for uid in [deal["buyer_id"], deal["seller_id"]]:
             try:
@@ -1861,13 +1685,12 @@ async def dealcomplete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=(
                         f"🎉 Deal #{deal_id} is complete!\n\n"
                         f"Please leave a review:\n"
-                        f"/review @{seller_username} <1-5> <your comment>"
+                        f"`/review @{seller_username} <1-5> <comment>`"
                     ),
                 )
             except TelegramError:
                 pass
 
-        # Post seller card in group
         await post_seller_card(context.bot, deal["seller_id"], GROUP_ID)
 
         try:
@@ -1878,7 +1701,7 @@ async def dealcomplete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🆔 Deal ID: #{deal_id}\n"
                     f"🛒 Tool: {deal['tool_name']}\n"
                     f"💰 Amount: {deal['amount']}\n\n"
-                    f"Congratulations to both parties! 🎊"
+                    "Congratulations to both parties! 🎊"
                 ),
                 parse_mode="Markdown",
             )
@@ -1887,35 +1710,113 @@ async def dealcomplete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def mydeals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/mydeals — list user's deals."""
-    user = update.effective_user
+    user  = update.effective_user
     deals = await get_user_deals(user.id)
     if not deals:
-        return await update.message.reply_text("📋 You have no deals yet.")
-    lines = ["📋 *Your Deals:*\n"]
+        return await edit_or_reply(update, "📋 You have no deals yet.", reply_markup=back_home())
+
     for d in deals:
         role = "Buyer" if d["buyer_id"] == user.id else "Seller"
-        lines.append(
-            f"• #{d['id']} | {d['tool_name']} | ₹{d['amount']} | {role} | Status: {d['status']}"
+        text = (
+            f"📋 *Deal #{d['id']}*\n"
+            f"🛒 Tool: {d['tool_name']}\n"
+            f"💰 Amount: ₹{d['amount']}\n"
+            f"👤 Role: {role}\n"
+            f"📊 Status: {d['status']}"
         )
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        try:
+            await update.effective_chat.send_message(
+                text,
+                parse_mode="Markdown",
+                reply_markup=deal_actions_kb(d["id"], d["status"]),
+            )
+        except TelegramError:
+            pass
+
+
+async def deal_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle deal:complete and deal:cancel from mydeals inline buttons."""
+    query = update.callback_query
+    await query.answer()
+    user  = query.from_user
+    parts = query.data.split(":")  # deal:complete:123 or deal:cancel:123
+
+    action  = parts[1]
+    deal_id = int(parts[2])
+
+    deal = await get_deal(deal_id)
+    if not deal:
+        await query.edit_message_text("❌ Deal not found.")
+        return
+    if user.id not in [deal["buyer_id"], deal["seller_id"]]:
+        await query.answer("This deal doesn't belong to you!", show_alert=True)
+        return
+
+    if action == "complete":
+        if deal["status"] != "active":
+            await query.edit_message_text(f"❌ Deal is already {deal['status']}.")
+            return
+        if "deal_confirmations" not in context.bot_data:
+            context.bot_data["deal_confirmations"] = {}
+        confirmations = context.bot_data["deal_confirmations"].setdefault(deal_id, set())
+        confirmations.add(user.id)
+        await query.edit_message_text(
+            f"✅ Confirmation recorded for Deal #{deal_id}! Waiting for the other party."
+        )
+        if deal["buyer_id"] in confirmations and deal["seller_id"] in confirmations:
+            context.bot_data["deal_confirmations"].pop(deal_id, None)
+            from datetime import timezone as tz
+            await update_deal(deal_id, status="completed",
+                              completed_at=datetime.now(tz.utc).isoformat(),
+                              buyer_confirmed=True, seller_confirmed=True)
+            seller    = await get_member(deal["seller_id"])
+            new_total = (seller.get("total_deals", 0) if seller else 0) + 1
+            await update_member(deal["seller_id"], total_deals=new_total)
+            await post_seller_card(context.bot, deal["seller_id"], GROUP_ID)
+
+    elif action == "cancel":
+        if deal["status"] in ["completed", "cancelled"]:
+            await query.edit_message_text(f"❌ Deal is already {deal['status']}.")
+            return
+        if "deal_cancel_requests" not in context.bot_data:
+            context.bot_data["deal_cancel_requests"] = {}
+        cancel_requests = context.bot_data["deal_cancel_requests"].setdefault(deal_id, set())
+        cancel_requests.add(user.id)
+        await query.edit_message_text(
+            f"⚠️ Cancellation requested for Deal #{deal_id}. Waiting for the other party."
+        )
+        other_id = deal["seller_id"] if user.id == deal["buyer_id"] else deal["buyer_id"]
+        try:
+            await context.bot.send_message(
+                chat_id=other_id,
+                text=f"⚠️ Cancellation requested for Deal #{deal_id}. Tap the deal to agree.",
+            )
+        except TelegramError:
+            pass
+        if deal["buyer_id"] in cancel_requests and deal["seller_id"] in cancel_requests:
+            context.bot_data["deal_cancel_requests"].pop(deal_id, None)
+            await update_deal(deal_id, status="cancelled")
+            for uid in [deal["buyer_id"], deal["seller_id"]]:
+                try:
+                    await context.bot.send_message(chat_id=uid, text=f"✅ Deal #{deal_id} cancelled.")
+                except TelegramError:
+                    pass
 
 
 async def canceldeal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/canceldeal <deal_id> — both parties must cancel."""
     user = update.effective_user
     if not context.args:
         return await update.message.reply_text("Usage: /canceldeal <deal_id>")
     try:
         deal_id = int(context.args[0])
     except ValueError:
-        return await update.message.reply_text("❌ Please provide a valid deal ID.")
+        return await update.message.reply_text("❌ Provide a valid deal ID.")
 
     deal = await get_deal(deal_id)
     if not deal:
         return await update.message.reply_text("❌ Deal not found.")
     if user.id not in [deal["buyer_id"], deal["seller_id"]]:
-        return await update.message.reply_text("❌ This deal does not belong to you.")
+        return await update.message.reply_text("❌ This deal doesn't belong to you.")
     if deal["status"] in ["completed", "cancelled"]:
         return await update.message.reply_text(f"❌ Deal is already {deal['status']}.")
 
@@ -1924,13 +1825,13 @@ async def canceldeal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cancel_requests = context.bot_data["deal_cancel_requests"].setdefault(deal_id, set())
     cancel_requests.add(user.id)
 
-    await update.message.reply_text(f"⚠️ You have requested to cancel Deal #{deal_id}. Waiting for the other party.")
+    await update.message.reply_text(f"⚠️ Cancellation requested for Deal #{deal_id}.")
 
     other_id = deal["seller_id"] if user.id == deal["buyer_id"] else deal["buyer_id"]
     try:
         await context.bot.send_message(
             chat_id=other_id,
-            text=f"⚠️ A cancellation request was made for Deal #{deal_id}. Use /canceldeal {deal_id} to agree.",
+            text=f"⚠️ Cancellation requested for Deal #{deal_id}. Use /canceldeal {deal_id} to agree.",
         )
     except TelegramError:
         pass
@@ -1942,7 +1843,7 @@ async def canceldeal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             job.schedule_removal()
         for uid in [deal["buyer_id"], deal["seller_id"]]:
             try:
-                await context.bot.send_message(chat_id=uid, text=f"✅ Deal #{deal_id} has been cancelled.")
+                await context.bot.send_message(chat_id=uid, text=f"✅ Deal #{deal_id} cancelled.")
             except TelegramError:
                 pass
 
@@ -1952,39 +1853,33 @@ async def canceldeal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def ranking_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Top sellers by trust votes."""
     top = await get_top_by_trust(10)
     if not top:
-        return await update.message.reply_text("👍 No trust vote data available yet.")
+        return await edit_or_reply(update, "👍 No trust vote data yet.", reply_markup=back_home())
     lines = ["👑 *Trust Ranking:*\n"]
     for i, m in enumerate(top, 1):
-        uname = f"@{m['username']}" if m.get("username") else m.get("full_name", "?")
-        badge = m.get("badge") or ""
+        uname    = f"@{m['username']}" if m.get("username") else m.get("full_name", "?")
+        badge    = m.get("badge") or ""
         verified = "✅" if m.get("is_verified") else ""
-        trust = m.get("trust_count", 0)
+        trust    = m.get("trust_count", 0)
         lines.append(f"{i}. {uname} {verified} {badge} — 👍 {trust}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
 
 
 async def trust_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle trust_{seller_id} callback."""
-    query = update.callback_query
+    query     = update.callback_query
     await query.answer()
-    voter = query.from_user
+    voter     = query.from_user
     seller_id = int(query.data.split("_")[1])
 
     result = await add_trust_vote(voter.id, seller_id)
-
-    if result == "ok":
-        await query.answer("✅ Trust vote submitted successfully!", show_alert=True)
-    elif result == "self_vote":
-        await query.answer("❌ You cannot vote for yourself!", show_alert=True)
-    elif result == "already_voted":
-        await query.answer("⚠️ You have already voted for this seller!", show_alert=True)
-    elif result == "no_deal":
-        await query.answer("❌ You need a completed deal with this seller to vote!", show_alert=True)
-    else:
-        await query.answer("❌ An error occurred. Please try again.", show_alert=True)
+    msgs = {
+        "ok":            "✅ Trust vote submitted!",
+        "self_vote":     "❌ You cannot vote for yourself!",
+        "already_voted": "⚠️ You already voted for this seller!",
+        "no_deal":       "❌ You need a completed deal with this seller to vote!",
+    }
+    await query.answer(msgs.get(result, "❌ An error occurred."), show_alert=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1992,40 +1887,168 @@ async def trust_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show all commands."""
     is_adm = await is_admin(update.effective_user.id, context)
     text = (
         "📖 *AI Tools Buy/Sell Bot*\n\n"
-        "Use the keyboard buttons below to navigate, or type commands:\n\n"
+        "Tap buttons in the main menu to navigate, or use commands:\n\n"
         "🛒 *Sell* — Create a sell listing\n"
         "🛍️ *Buy* — Post a buy request\n"
-        "🔍 *Search* — Search active listings\n"
-        "📋 *My Listings* — View your listings\n"
-        "🔗 *My Referral Link* — Your referral link\n"
-        "📊 *My Stats* — Referral stats & badge\n"
-        "👤 *My Profile* — View your profile\n"
-        "🏆 *Leaderboard* — Top 10 referrers\n"
-        "⭐ *Top Sellers* — Top sellers by rating\n"
-        "👑 *Trust Ranking* — Trust vote ranking\n"
-        "✅ *Get Verified* — Request verified seller\n"
+        "🔍 *Search* — Find active listings\n"
+        "📋 *My Listings* — Manage your listings\n"
+        "🔗 *Referral Link* — Share & earn badges\n"
+        "📊 *My Stats* — Your referral stats\n"
+        "👤 *My Profile* — View your full profile\n"
+        "🏆 *Leaderboard* — Top referrers\n"
+        "⭐ *Top Sellers* — Best rated sellers\n"
+        "👑 *Trust Ranking* — Most trusted sellers\n"
+        "✅ *Get Verified* — Request verified badge\n"
         "🤝 *My Deals* — Your active deals\n"
         "🏅 *Badges* — Badge milestones\n\n"
-        "Other commands:\n"
-        "`/review @seller <1-5> <comment>` — Review a seller\n"
-        "`/profile @user` — View another user's profile\n"
-        "`/deal @buyer @seller <amount>` — Initiate a deal\n"
+        "Commands:\n"
+        "`/review @seller <1-5> <comment>`\n"
+        "`/profile @user` — View someone's profile\n"
+        "`/deal @buyer @seller <amount>` — New deal\n"
         "`/dealcomplete <id>` — Confirm deal done\n"
         "`/canceldeal <id>` — Cancel a deal\n"
         "`/delist <id>` — Remove your listing\n"
-        "`/verified` — List all verified sellers\n"
+        "`/verified` — List verified sellers\n"
     )
     if is_adm:
-        text += "\n⚙️ *Admin:* Tap the *Admin Panel* button or use `/ban`, `/mute`, `/warn`, `/stats`, `/announce`, `/approve`, etc."
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard(is_adm),
-    )
+        text += "\n⚙️ Tap *Admin Panel* for admin tools."
+
+    is_adm_full = await is_admin(update.effective_user.id, context)
+    await edit_or_reply(update, text, parse_mode="Markdown", reply_markup=main_menu(is_adm_full))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CENTRAL MENU ROUTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Route all menu:* callbacks to the right handler."""
+    query = update.callback_query
+    await query.answer()
+    data  = query.data
+
+    try:
+        if data == "menu:home":
+            is_adm = await is_admin(query.from_user.id, context)
+            await edit_or_reply(
+                update,
+                f"👋 *Welcome back, {query.from_user.first_name}!*\n\nChoose an option 👇",
+                parse_mode="Markdown",
+                reply_markup=main_menu(is_adm),
+            )
+
+        elif data in ("menu:sell", "menu:buy"):
+            pass  # handled by ConversationHandler entry points
+
+        elif data == "menu:mylistings":
+            await mylistings(update, context)
+
+        elif data == "menu:mylink":
+            await mylink(update, context)
+
+        elif data == "menu:mystats":
+            await mystats(update, context)
+
+        elif data == "menu:profile":
+            context.args = []
+            await profile_cmd(update, context)
+
+        elif data == "menu:leaderboard":
+            await leaderboard(update, context)
+
+        elif data == "menu:topsellers":
+            await topsellers_cmd(update, context)
+
+        elif data == "menu:ranking":
+            await ranking_cmd(update, context)
+
+        elif data == "menu:verify":
+            await verify_cmd(update, context)
+
+        elif data == "menu:mydeals":
+            await mydeals_cmd(update, context)
+
+        elif data == "menu:badges":
+            await badges(update, context)
+
+        elif data == "menu:help":
+            await help_cmd(update, context)
+
+        elif data == "menu:adminpanel":
+            if not await is_admin(query.from_user.id, context):
+                await query.answer("Admins only!", show_alert=True)
+                return
+            await edit_or_reply(
+                update,
+                "⚙️ *Admin Panel*\n\nSelect an action:",
+                parse_mode="Markdown",
+                reply_markup=admin_panel_kb(),
+            )
+
+        # ── Admin Panel actions ───────────────────────────────────────────
+
+        elif data == "adm:stats":
+            if not await is_admin(query.from_user.id, context):
+                await query.answer("Admins only!", show_alert=True)
+                return
+            stats = await get_group_stats()
+            await edit_or_reply(
+                update,
+                f"📊 *Group Stats*\n\n"
+                f"👥 Total Members: {stats['total_members']}\n"
+                f"📦 Listings Today: {stats['listings_today']}\n"
+                f"🆕 New Joins Today: {stats['new_joins_today']}",
+                parse_mode="Markdown",
+                reply_markup=admin_panel_kb(),
+            )
+
+        elif data == "adm:scamwords":
+            if not await is_admin(query.from_user.id, context):
+                await query.answer("Admins only!", show_alert=True)
+                return
+            words     = context.bot_data.get("scam_words_cache", [])
+            word_list = ", ".join(words) if words else "None added yet"
+            await edit_or_reply(
+                update,
+                f"🚫 *Scam Filter Words:*\n`{word_list}`\n\nAdd: `/addword <word>`\nRemove: `/removeword <word>`",
+                parse_mode="Markdown",
+                reply_markup=admin_panel_kb(),
+            )
+
+        elif data == "adm:ban_info":
+            await edit_or_reply(update, "🔨 *Ban*\nUsage: `/ban @username` or reply to message.",
+                                parse_mode="Markdown", reply_markup=admin_panel_kb())
+
+        elif data == "adm:mute_info":
+            await edit_or_reply(update, "🔇 *Mute*\nUsage: `/mute @username <minutes>`\nDefault: 10 minutes.",
+                                parse_mode="Markdown", reply_markup=admin_panel_kb())
+
+        elif data == "adm:warn_info":
+            await edit_or_reply(update, "⚠️ *Warn*\nUsage: `/warn @username`\nAuto-bans at warning limit.",
+                                parse_mode="Markdown", reply_markup=admin_panel_kb())
+
+        elif data == "adm:approve_info":
+            await edit_or_reply(update, "✅ *Approve Seller*\nUsage: `/approve @username`",
+                                parse_mode="Markdown", reply_markup=admin_panel_kb())
+
+        elif data == "adm:announce_info":
+            await edit_or_reply(update, "📢 *Announce*\nUsage: `/announce <message>`\nDMs all members.",
+                                parse_mode="Markdown", reply_markup=admin_panel_kb())
+
+        elif data == "adm:badge_info":
+            await edit_or_reply(update,
+                                "🏅 *Set Badge*\nUsage: `/setbadge <count> <name>`\nExample: `/setbadge 5 Star Seller`",
+                                parse_mode="Markdown", reply_markup=admin_panel_kb())
+
+        elif data == "adm:sellercard_info":
+            await edit_or_reply(update, "🃏 *Seller Card*\nUsage: `/sellercard @username`",
+                                parse_mode="Markdown", reply_markup=admin_panel_kb())
+
+    except Exception as e:
+        logger.error(f"menu_router error on '{data}': {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2034,19 +2057,15 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def setup_jobs(application: Application):
     job_queue = application.job_queue
-    ist = pytz.timezone("Asia/Kolkata")
+    ist       = pytz.timezone("Asia/Kolkata")
+    now_ist   = datetime.now(ist)
 
-    now_ist = datetime.now(ist)
-
-    # Daily 9 AM IST
     morning_time = now_ist.replace(hour=9, minute=0, second=0, microsecond=0).timetz()
     job_queue.run_daily(daily_morning_post, time=morning_time)
 
-    # Sunday 6 PM IST
     sunday_time = now_ist.replace(hour=18, minute=0, second=0, microsecond=0).timetz()
     job_queue.run_daily(weekly_leaderboard_post, time=sunday_time, days=(6,))
 
-    # Refresh scam words every 30 minutes
     job_queue.run_repeating(refresh_scam_words_job, interval=1800, first=10)
 
 
@@ -2055,28 +2074,23 @@ def setup_jobs(application: Application):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    import logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    application = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .build()
-    )
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # ── Sell ConversationHandler ──────────────────────────────────────────
     sell_conv = ConversationHandler(
         entry_points=[
             CommandHandler("sell", sell_start),
-            MessageHandler(filters.Regex(r"^🛒 Sell$") & filters.ChatType.PRIVATE, sell_start),
+            CallbackQueryHandler(sell_start, pattern=r"^menu:sell$"),
         ],
         states={
-            SELL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_name)],
+            SELL_NAME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_name)],
             SELL_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_price)],
-            SELL_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_desc)],
+            SELL_DESC:  [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_desc)],
             SELL_PHOTO: [
                 MessageHandler(filters.PHOTO | filters.Document.IMAGE, sell_photo),
                 CommandHandler("skip", sell_skip_photo),
@@ -2092,10 +2106,10 @@ def main():
     buy_conv = ConversationHandler(
         entry_points=[
             CommandHandler("buy", buy_start),
-            MessageHandler(filters.Regex(r"^🛍️ Buy$") & filters.ChatType.PRIVATE, buy_start),
+            CallbackQueryHandler(buy_start, pattern=r"^menu:buy$"),
         ],
         states={
-            BUY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_name)],
+            BUY_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_name)],
             BUY_BUDGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_budget)],
             BUY_REQ: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, buy_req),
@@ -2108,15 +2122,15 @@ def main():
         allow_reentry=True,
     )
 
-    # ── Search ConversationHandler ────────────────────────────────────────
+    # ── Search ConversationHandler (from inline button) ───────────────────
     search_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(r"^🔍 Search$") & filters.ChatType.PRIVATE, search_button_start),
+            CallbackQueryHandler(search_start_menu, pattern=r"^menu:search$"),
         ],
         states={
             SEARCH_QUERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_query_handler)],
         },
-        fallbacks=[CommandHandler("cancel", search_conv_cancel)],
+        fallbacks=[CommandHandler("cancel", search_cancel)],
         per_user=True,
         per_chat=False,
         allow_reentry=True,
@@ -2124,104 +2138,71 @@ def main():
 
     # ── Register handlers ─────────────────────────────────────────────────
 
-    # Chat member updates (captcha)
     application.add_handler(ChatMemberHandler(chat_member_updated, ChatMemberHandler.CHAT_MEMBER))
 
-    # Conversations
+    # Conversations (must be before generic callback handler)
     application.add_handler(sell_conv)
     application.add_handler(buy_conv)
     application.add_handler(search_conv)
 
     # Callback queries
-    application.add_handler(CallbackQueryHandler(captcha_callback, pattern=r"^captcha_"))
-    application.add_handler(CallbackQueryHandler(verify_callback, pattern=r"^verify_"))
-    application.add_handler(CallbackQueryHandler(deal_callback, pattern=r"^deal_(accept|decline)_"))
-    application.add_handler(CallbackQueryHandler(trust_callback, pattern=r"^trust_"))
-    application.add_handler(CallbackQueryHandler(profile_callback, pattern=r"^profile_"))
-    application.add_handler(CallbackQueryHandler(admin_panel_callback, pattern=r"^adm_"))
-
-    # Keyboard button handler (private chat only — buttons not handled by conversations above)
-    BUTTON_HANDLERS = {
-        r"^🔗 My Referral Link$": mylink,
-        r"^📊 My Stats$": mystats,
-        r"^👤 My Profile$": profile_cmd,
-        r"^🏆 Leaderboard$": leaderboard,
-        r"^⭐ Top Sellers$": topsellers_cmd,
-        r"^👑 Trust Ranking$": ranking_cmd,
-        r"^✅ Get Verified$": verify_cmd,
-        r"^🤝 My Deals$": mydeals_cmd,
-        r"^🏅 Badges$": badges,
-        r"^❓ Help$": help_cmd,
-        r"^📋 My Listings$": mylistings,
-        r"^⚙️ Admin Panel$": admin_panel_cmd,
-    }
-    for pattern, handler_func in BUTTON_HANDLERS.items():
-        application.add_handler(
-            MessageHandler(
-                filters.Regex(pattern) & filters.ChatType.PRIVATE,
-                handler_func,
-            )
-        )
+    application.add_handler(CallbackQueryHandler(captcha_callback,      pattern=r"^captcha_"))
+    application.add_handler(CallbackQueryHandler(verify_callback,       pattern=r"^verify_"))
+    application.add_handler(CallbackQueryHandler(deal_callback,         pattern=r"^deal_(accept|decline)_"))
+    application.add_handler(CallbackQueryHandler(deal_action_callback,  pattern=r"^deal:(complete|cancel):"))
+    application.add_handler(CallbackQueryHandler(trust_callback,        pattern=r"^trust_"))
+    application.add_handler(CallbackQueryHandler(profile_callback,      pattern=r"^profile_"))
+    application.add_handler(CallbackQueryHandler(menu_router,           pattern=r"^(menu:|adm:)"))
 
     # User commands
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_cmd))
-    application.add_handler(CommandHandler("mylink", mylink))
-    application.add_handler(CommandHandler("mystats", mystats))
-    application.add_handler(CommandHandler("badges", badges))
+    application.add_handler(CommandHandler("start",       start))
+    application.add_handler(CommandHandler("help",        help_cmd))
+    application.add_handler(CommandHandler("mylink",      mylink))
+    application.add_handler(CommandHandler("mystats",     mystats))
+    application.add_handler(CommandHandler("badges",      badges))
     application.add_handler(CommandHandler("leaderboard", leaderboard))
-    application.add_handler(CommandHandler("search", search_cmd))
-    application.add_handler(CommandHandler("mylistings", mylistings))
-    application.add_handler(CommandHandler("delist", delist_cmd))
-    application.add_handler(CommandHandler("verify", verify_cmd))
-    application.add_handler(CommandHandler("verified", verified_cmd))
-    application.add_handler(CommandHandler("review", review_cmd))
-    application.add_handler(CommandHandler("profile", profile_cmd))
-    application.add_handler(CommandHandler("topsellers", topsellers_cmd))
-    application.add_handler(CommandHandler("ranking", ranking_cmd))
-    application.add_handler(CommandHandler("deal", deal_cmd))
-    application.add_handler(CommandHandler("mydeals", mydeals_cmd))
-    application.add_handler(CommandHandler("dealcomplete", dealcomplete_cmd))
-    application.add_handler(CommandHandler("canceldeal", canceldeal_cmd))
+    application.add_handler(CommandHandler("search",      search_cmd))
+    application.add_handler(CommandHandler("mylistings",  mylistings))
+    application.add_handler(CommandHandler("delist",      delist_cmd))
+    application.add_handler(CommandHandler("verify",      verify_cmd))
+    application.add_handler(CommandHandler("verified",    verified_cmd))
+    application.add_handler(CommandHandler("review",      review_cmd))
+    application.add_handler(CommandHandler("profile",     profile_cmd))
+    application.add_handler(CommandHandler("topsellers",  topsellers_cmd))
+    application.add_handler(CommandHandler("ranking",     ranking_cmd))
+    application.add_handler(CommandHandler("deal",        deal_cmd))
+    application.add_handler(CommandHandler("mydeals",     mydeals_cmd))
+    application.add_handler(CommandHandler("dealcomplete",dealcomplete_cmd))
+    application.add_handler(CommandHandler("canceldeal",  canceldeal_cmd))
 
     # Admin commands
-    application.add_handler(CommandHandler("ban", ban_cmd))
-    application.add_handler(CommandHandler("mute", mute_cmd))
-    application.add_handler(CommandHandler("warn", warn_cmd))
-    application.add_handler(CommandHandler("warnings", warnings_cmd))
-    application.add_handler(CommandHandler("stats", stats_cmd))
-    application.add_handler(CommandHandler("addword", addword_cmd))
-    application.add_handler(CommandHandler("removeword", removeword_cmd))
-    application.add_handler(CommandHandler("announce", announce_cmd))
-    application.add_handler(CommandHandler("approve", approve_cmd))
-    application.add_handler(CommandHandler("reject", reject_cmd))
-    application.add_handler(CommandHandler("sellercard", sellercard_cmd))
-    application.add_handler(CommandHandler("setbadge", setbadge))
-    application.add_handler(CommandHandler("editbadge", editbadge))
+    application.add_handler(CommandHandler("ban",         ban_cmd))
+    application.add_handler(CommandHandler("mute",        mute_cmd))
+    application.add_handler(CommandHandler("warn",        warn_cmd))
+    application.add_handler(CommandHandler("warnings",    warnings_cmd))
+    application.add_handler(CommandHandler("stats",       stats_cmd))
+    application.add_handler(CommandHandler("addword",     addword_cmd))
+    application.add_handler(CommandHandler("removeword",  removeword_cmd))
+    application.add_handler(CommandHandler("announce",    announce_cmd))
+    application.add_handler(CommandHandler("approve",     approve_cmd))
+    application.add_handler(CommandHandler("reject",      reject_cmd))
+    application.add_handler(CommandHandler("sellercard",  sellercard_cmd))
+    application.add_handler(CommandHandler("adminpanel",  admin_panel_cmd))
+    application.add_handler(CommandHandler("setbadge",    setbadge))
+    application.add_handler(CommandHandler("editbadge",   editbadge))
     application.add_handler(CommandHandler("removebadge", removebadge))
-    application.add_handler(CommandHandler("adminpanel", admin_panel_cmd))
 
-    # Group message filters (order matters — run all via separate handlers)
-    application.add_handler(
-        MessageHandler(
-            filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND,
-            anti_flood_filter,
-        )
-    )
-    application.add_handler(
-        MessageHandler(
-            filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND,
-            link_filter,
-        )
-    )
-    application.add_handler(
-        MessageHandler(
-            filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND,
-            scam_word_filter,
-        )
-    )
+    # Group message filters
+    application.add_handler(MessageHandler(
+        filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND, anti_flood_filter,
+    ))
+    application.add_handler(MessageHandler(
+        filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND, link_filter,
+    ))
+    application.add_handler(MessageHandler(
+        filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND, scam_word_filter,
+    ))
 
-    # Setup scheduled jobs
     setup_jobs(application)
 
     logger.info("Bot starting...")
