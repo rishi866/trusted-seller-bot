@@ -22,6 +22,7 @@ from telegram.ext import (
     ConversationHandler,
     filters,
     ContextTypes,
+    ApplicationHandlerStop,
 )
 from telegram.error import TelegramError, BadRequest
 
@@ -565,10 +566,14 @@ async def _fetch_from_pack(bot, pack_name: str) -> tuple[int, list[str]]:
 
 
 async def emoji_capture_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Capture custom animated emoji — from pack link OR direct emoji in message."""
+    """Capture custom animated emoji — from pack link OR direct emoji in message.
+
+    Runs in group=-1 (before ConversationHandlers). Raises ApplicationHandlerStop
+    when in capture mode so ConversationHandlers don't also consume the message.
+    """
     user = update.effective_user
     if context.bot_data.get("emoji_capture_admin") != user.id:
-        return  # not in capture mode for this user
+        return  # not in capture mode — let other handlers proceed normally
 
     msg  = update.effective_message
     text = msg.text or msg.caption or ""
@@ -601,7 +606,7 @@ async def emoji_capture_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode="HTML",
                 reply_markup=admin_panel_kb(),
             )
-        return
+        raise ApplicationHandlerStop  # don't let ConversationHandlers see this
 
     # ── Case 2: admin typed / forwarded message with custom emoji ─────────────
     from db import save_custom_emoji
@@ -616,7 +621,7 @@ async def emoji_capture_handler(update: Update, context: ContextTypes.DEFAULT_TY
             "• A message containing custom animated emoji",
             parse_mode="HTML",
         )
-        return
+        raise ApplicationHandlerStop
 
     saved = 0
     details = []
@@ -640,6 +645,7 @@ async def emoji_capture_handler(update: Update, context: ContextTypes.DEFAULT_TY
         parse_mode="HTML",
         reply_markup=admin_panel_kb(),
     )
+    raise ApplicationHandlerStop
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2292,7 +2298,10 @@ def main():
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    async def _post_init(app: Application) -> None:
+        await emoji_fx.load()
+
+    application = ApplicationBuilder().token(BOT_TOKEN).post_init(_post_init).build()
 
     # ── Sell ConversationHandler ──────────────────────────────────────────
     sell_conv = ConversationHandler(
@@ -2406,11 +2415,11 @@ def main():
     application.add_handler(CommandHandler("editbadge",   editbadge))
     application.add_handler(CommandHandler("removebadge", removebadge))
 
-    # Emoji capture (private DM from admin — highest priority for TEXT in DM)
+    # Emoji capture — group=-1 so it fires before ConversationHandlers (group=0)
     application.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & (filters.TEXT | filters.FORWARDED),
         emoji_capture_handler,
-    ), group=0)
+    ), group=-1)
 
     # Group message filters
     application.add_handler(MessageHandler(
