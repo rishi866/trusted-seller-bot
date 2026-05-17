@@ -81,6 +81,10 @@ from db import (
     get_group_stats,
     set_verified,
     get_verified_sellers,
+    get_card_cooldown,
+    set_card_cooldown,
+    record_deal_confirmation,
+    record_cancel_request,
 )
 from keyboards import (
     main_menu,
@@ -270,14 +274,19 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
     except TelegramError as e:
         logger.warning(f"Could not mute new member {user_id}: {e}")
 
-    a = random.randint(1, 9)
-    b = random.randint(1, 9)
-    correct = a + b
-    wrong1  = correct + random.choice([-2, -1, 1, 2, 3])
-    wrong2  = correct + random.choice([-3, -1, 2, 4, 5])
-    if wrong2 == wrong1: wrong2 += 1
-    if wrong1 == correct: wrong1 += 1
-    if wrong2 == correct: wrong2 += 1
+    # Harder captcha: mix addition and multiplication, larger numbers
+    op = random.choice(["+", "×"])
+    if op == "+":
+        a, b    = random.randint(10, 50), random.randint(10, 50)
+        correct = a + b
+    else:
+        a, b    = random.randint(2, 12), random.randint(2, 12)
+        correct = a * b
+    # Generate two distinct wrong answers far enough from correct
+    offsets = random.sample([-7, -5, -4, -3, 3, 4, 5, 7, 8, 10, 11], 2)
+    wrong1, wrong2 = correct + offsets[0], correct + offsets[1]
+    while wrong1 <= 0: wrong1 += 3
+    while wrong2 <= 0: wrong2 += 3
 
     options = [
         (str(correct), f"captcha_{user_id}_1"),
@@ -297,12 +306,12 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         msg = await context.bot.send_message(
             chat_id=GROUP_ID,
-            text=(
-                f"👋 Welcome @{username}!\n"
-                f"Prove you are human — *{a} + {b} = ?*\n"
+            text=decorate(
+                f"👋 <b>Welcome @{username}!</b>\n"
+                f"🔒 Prove you are human — <b>{a} {op} {b} = ?</b>\n"
                 f"⏳ You have {CAPTCHA_TIMEOUT} seconds!"
             ),
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=keyboard,
         )
         if "pending_captcha" not in context.bot_data:
@@ -359,11 +368,11 @@ async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=GROUP_ID,
-                text=(
-                    f"✅ Welcome to *AI Tools Buy/Sell*, {username_display(voter)}! 🎉\n"
-                    "Read the rules, explore listings, and enjoy trading! 🚀"
+                text=decorate(
+                    f"✅ <b>Welcome to AI Tools Buy/Sell, {h(username_display(voter))}!</b> 🎉\n"
+                    "📋 Read the rules, explore listings, and enjoy trading! 🚀"
                 ),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
         except TelegramError:
             pass
@@ -861,10 +870,19 @@ async def sell_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def sell_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_id = None
+    MAX_BYTES = 5 * 1024 * 1024  # 5 MB
     if update.message.photo:
-        file_id = update.message.photo[-1].file_id
+        photo = update.message.photo[-1]
+        if photo.file_size and photo.file_size > MAX_BYTES:
+            await update.message.reply_text("❌ Image too large (max 5 MB). Send a smaller one or /skip.")
+            return SELL_PHOTO
+        file_id = photo.file_id
     elif update.message.document:
-        file_id = update.message.document.file_id
+        doc = update.message.document
+        if doc.file_size and doc.file_size > MAX_BYTES:
+            await update.message.reply_text("❌ File too large (max 5 MB). Send a smaller one or /skip.")
+            return SELL_PHOTO
+        file_id = doc.file_id
     await _finalize_sell(update, context, update.effective_user, file_id)
     return ConversationHandler.END
 
@@ -1050,7 +1068,7 @@ async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     lines = [f"🔍 *Search Results for '{keyword}':*\n"]
     for r in results[:10]:
         t     = "🔥 SELL" if r["type"] == "sell" else "🛍️ BUY"
-        uname = f"@{r['username']}" if r.get("username") else "?"
+        uname = f"@{r['username']}" if r.get("username") else r.get("full_name", "?")
         lines.append(f"• {t} | {r['tool_name']} | ₹{r.get('price', '?')} | {uname} | #ID{r['id']}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
     return ConversationHandler.END
@@ -1073,7 +1091,7 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"🔍 *Search Results for '{keyword}':*\n"]
     for r in results[:10]:
         t     = "🔥 SELL" if r["type"] == "sell" else "🛍️ BUY"
-        uname = f"@{r['username']}" if r.get("username") else "?"
+        uname = f"@{r['username']}" if r.get("username") else r.get("full_name", "?")
         lines.append(f"• {t} | {r['tool_name']} | ₹{r.get('price', '?')} | {uname} | #ID{r['id']}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
 
@@ -1083,12 +1101,23 @@ async def mylistings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     listings = await get_user_listings(user.id)
     if not listings:
         return await edit_or_reply(update, "📋 You have no active listings.", reply_markup=back_home())
-    lines = ["📋 *Your Active Listings:*\n"]
+    from datetime import timezone as tz
+    now   = datetime.now(tz.utc)
+    lines = ["📋 <b>Your Active Listings:</b>\n"]
     for r in listings:
-        t = "🔥 SELL" if r["type"] == "sell" else "🛍️ BUY"
-        lines.append(f"• #{r['id']} | {t} | {r['tool_name']} | {r.get('price', '?')}")
-    lines.append("\nTo remove: `/delist <id>`")
-    await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
+        t     = "🔥 SELL" if r["type"] == "sell" else "🛍️ BUY"
+        uname = f"@{r['username']}" if r.get("username") else r.get("full_name", "?")
+        exp_str = ""
+        if r.get("expires_at"):
+            try:
+                exp_dt  = datetime.fromisoformat(r["expires_at"].replace("Z", "+00:00"))
+                days    = max(0, (exp_dt - now).days)
+                exp_str = f" | ⏳ {days}d left"
+            except Exception:
+                pass
+        lines.append(f"• <b>#{r['id']}</b> | {t} | {h(r['tool_name'])} | ₹{h(r.get('price','?'))}{exp_str}")
+    lines.append("\nTo remove: <code>/delist &lt;id&gt;</code>")
+    await edit_or_reply(update, decorate("\n".join(lines)), parse_mode="HTML", reply_markup=back_home())
 
 
 async def delist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1616,6 +1645,14 @@ async def topsellers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def deal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Rate limit: one deal creation per user per 60 seconds
+    uid = update.effective_user.id
+    rl  = context.bot_data.setdefault("deal_rl", {})
+    now = time.time()
+    if now - rl.get(uid, 0) < 60:
+        return await update.message.reply_text("⏳ Please wait 60 seconds before creating another deal.")
+    rl[uid] = now
+
     args = context.args
     if not args or len(args) < 3:
         return await update.message.reply_text(
@@ -1786,21 +1823,16 @@ async def dealcomplete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if deal["status"] != "active":
         return await update.message.reply_text(f"❌ Deal status is '{deal['status']}'.")
 
-    if "deal_confirmations" not in context.bot_data:
-        context.bot_data["deal_confirmations"] = {}
-    confirmations = context.bot_data["deal_confirmations"].setdefault(deal_id, set())
-    confirmations.add(user.id)
+    both_confirmed = await record_deal_confirmation(deal_id, user.id, deal["buyer_id"], deal["seller_id"])
 
     await update.message.reply_text(
         f"✅ Confirmation recorded for Deal #{deal_id}! Waiting for the other party."
     )
 
-    if deal["buyer_id"] in confirmations and deal["seller_id"] in confirmations:
-        context.bot_data["deal_confirmations"].pop(deal_id, None)
+    if both_confirmed:
         from datetime import timezone as tz
         await update_deal(deal_id, status="completed",
-                          completed_at=datetime.now(tz.utc).isoformat(),
-                          buyer_confirmed=True, seller_confirmed=True)
+                          completed_at=datetime.now(tz.utc).isoformat())
         seller = await get_member(deal["seller_id"])
         new_total = (seller.get("total_deals", 0) if seller else 0) + 1
         await update_member(deal["seller_id"], total_deals=new_total)
@@ -1813,11 +1845,12 @@ async def dealcomplete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=uid,
-                    text=(
-                        f"🎉 Deal #{deal_id} is complete!\n\n"
-                        f"Please leave a review:\n"
-                        f"`/review @{seller_username} <1-5> <comment>`"
+                    text=decorate(
+                        f"🎉 <b>Deal #{deal_id} is complete!</b>\n\n"
+                        f"🙏 Please leave a review:\n"
+                        f"<code>/review @{h(seller_username)} 1-5 your comment</code>"
                     ),
+                    parse_mode="HTML",
                 )
             except TelegramError:
                 pass
@@ -1887,19 +1920,14 @@ async def deal_action_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if deal["status"] != "active":
             await query.edit_message_text(f"❌ Deal is already {deal['status']}.")
             return
-        if "deal_confirmations" not in context.bot_data:
-            context.bot_data["deal_confirmations"] = {}
-        confirmations = context.bot_data["deal_confirmations"].setdefault(deal_id, set())
-        confirmations.add(user.id)
+        both_confirmed = await record_deal_confirmation(deal_id, user.id, deal["buyer_id"], deal["seller_id"])
         await query.edit_message_text(
             f"✅ Confirmation recorded for Deal #{deal_id}! Waiting for the other party."
         )
-        if deal["buyer_id"] in confirmations and deal["seller_id"] in confirmations:
-            context.bot_data["deal_confirmations"].pop(deal_id, None)
+        if both_confirmed:
             from datetime import timezone as tz
             await update_deal(deal_id, status="completed",
-                              completed_at=datetime.now(tz.utc).isoformat(),
-                              buyer_confirmed=True, seller_confirmed=True)
+                              completed_at=datetime.now(tz.utc).isoformat())
             seller    = await get_member(deal["seller_id"])
             new_total = (seller.get("total_deals", 0) if seller else 0) + 1
             await update_member(deal["seller_id"], total_deals=new_total)
@@ -1909,10 +1937,7 @@ async def deal_action_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if deal["status"] in ["completed", "cancelled"]:
             await query.edit_message_text(f"❌ Deal is already {deal['status']}.")
             return
-        if "deal_cancel_requests" not in context.bot_data:
-            context.bot_data["deal_cancel_requests"] = {}
-        cancel_requests = context.bot_data["deal_cancel_requests"].setdefault(deal_id, set())
-        cancel_requests.add(user.id)
+        both_requested = await record_cancel_request(deal_id, user.id, deal["buyer_id"], deal["seller_id"])
         await query.edit_message_text(
             f"⚠️ Cancellation requested for Deal #{deal_id}. Waiting for the other party."
         )
@@ -1924,8 +1949,7 @@ async def deal_action_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         except TelegramError:
             pass
-        if deal["buyer_id"] in cancel_requests and deal["seller_id"] in cancel_requests:
-            context.bot_data["deal_cancel_requests"].pop(deal_id, None)
+        if both_requested:
             await update_deal(deal_id, status="cancelled")
             for uid in [deal["buyer_id"], deal["seller_id"]]:
                 try:
@@ -1951,10 +1975,7 @@ async def canceldeal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if deal["status"] in ["completed", "cancelled"]:
         return await update.message.reply_text(f"❌ Deal is already {deal['status']}.")
 
-    if "deal_cancel_requests" not in context.bot_data:
-        context.bot_data["deal_cancel_requests"] = {}
-    cancel_requests = context.bot_data["deal_cancel_requests"].setdefault(deal_id, set())
-    cancel_requests.add(user.id)
+    both_requested = await record_cancel_request(deal_id, user.id, deal["buyer_id"], deal["seller_id"])
 
     await update.message.reply_text(f"⚠️ Cancellation requested for Deal #{deal_id}.")
 
@@ -1967,8 +1988,7 @@ async def canceldeal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except TelegramError:
         pass
 
-    if deal["buyer_id"] in cancel_requests and deal["seller_id"] in cancel_requests:
-        context.bot_data["deal_cancel_requests"].pop(deal_id, None)
+    if both_requested:
         await update_deal(deal_id, status="cancelled")
         for job in context.job_queue.get_jobs_by_name(f"auto_cancel_deal_{deal_id}"):
             job.schedule_removal()
@@ -1987,22 +2007,25 @@ async def mycard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Seller posts their own spotlight card in the group to request trust votes."""
     user = update.effective_user
 
-    # 24-hour cooldown
-    if "card_cooldown" not in context.bot_data:
-        context.bot_data["card_cooldown"] = {}
-    last_post = context.bot_data["card_cooldown"].get(user.id, 0)
-    cooldown  = 24 * 3600
-    remaining = cooldown - (time.time() - last_post)
-
-    if remaining > 0:
-        hours   = int(remaining // 3600)
-        minutes = int((remaining % 3600) // 60)
-        return await edit_or_reply(
-            update,
-            f"⏳ *Cooldown active!*\n\nYou can post your card again in *{hours}h {minutes}m*.\n\nOnly one card post per 24 hours! 🕒",
-            parse_mode="Markdown",
-            reply_markup=back_home(),
-        )
+    # 24-hour cooldown — DB-backed so it survives restarts
+    last_post_dt = await get_card_cooldown(user.id)
+    if last_post_dt:
+        from datetime import timezone as tz
+        elapsed   = (datetime.now(tz.utc) - last_post_dt).total_seconds()
+        remaining = 24 * 3600 - elapsed
+        if remaining > 0:
+            hours   = int(remaining // 3600)
+            minutes = int((remaining % 3600) // 60)
+            return await edit_or_reply(
+                update,
+                decorate(
+                    f"⏳ <b>Cooldown active!</b>\n\n"
+                    f"You can post your card again in <b>{hours}h {minutes}m</b>.\n\n"
+                    "Only one card post per 24 hours! 🕒"
+                ),
+                parse_mode="HTML",
+                reply_markup=back_home(),
+            )
 
     member = await get_or_create_member(user.id, user.username or "", user.full_name or "")
     avg, count = await get_seller_avg_rating(user.id)
@@ -2037,11 +2060,15 @@ async def mycard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=trust_profile_kb(user.id),
         )
-        context.bot_data["card_cooldown"][user.id] = time.time()
+        await set_card_cooldown(user.id)
         await edit_or_reply(
             update,
-            "✅ Your spotlight card has been posted in the group!\nPeople can now give you trust votes. 👍\n\n_Next post allowed after 24 hours._",
-            parse_mode="Markdown",
+            decorate(
+                "✅ <b>Your spotlight card has been posted!</b>\n"
+                "🙏 People can now give you trust votes.\n\n"
+                "⏰ Next post allowed after 24 hours."
+            ),
+            parse_mode="HTML",
             reply_markup=back_home(),
         )
     except TelegramError as e:
@@ -2085,36 +2112,34 @@ async def trust_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_adm = await is_admin(update.effective_user.id, context)
-    text = (
-        "📖 *AI Tools Buy/Sell Bot*\n\n"
+    text = decorate(
+        "📖 <b>AI Tools Buy/Sell Bot</b>\n\n"
         "Tap buttons in the main menu to navigate, or use commands:\n\n"
-        "🛒 *Sell* — Create a sell listing\n"
-        "🛍️ *Buy* — Post a buy request\n"
-        "🔍 *Search* — Find active listings\n"
-        "📋 *My Listings* — Manage your listings\n"
-        "🔗 *Referral Link* — Share & earn badges\n"
-        "📊 *My Stats* — Your referral stats\n"
-        "👤 *My Profile* — View your full profile\n"
-        "🏆 *Leaderboard* — Top referrers\n"
-        "⭐ *Top Sellers* — Best rated sellers\n"
-        "👑 *Trust Ranking* — Most trusted sellers\n"
-        "✅ *Get Verified* — Request verified badge\n"
-        "🤝 *My Deals* — Your active deals\n"
-        "🏅 *Badges* — Badge milestones\n\n"
+        "🛒 <b>Sell</b> — Create a sell listing\n"
+        "🛍️ <b>Buy</b> — Post a buy request\n"
+        "🔍 <b>Search</b> — Find active listings\n"
+        "📋 <b>My Listings</b> — Manage your listings\n"
+        "🔗 <b>Referral Link</b> — Share &amp; earn badges\n"
+        "📊 <b>My Stats</b> — Your referral stats\n"
+        "👤 <b>My Profile</b> — View your full profile\n"
+        "🏆 <b>Leaderboard</b> — Top referrers\n"
+        "⭐ <b>Top Sellers</b> — Best rated sellers\n"
+        "👑 <b>Trust Ranking</b> — Most trusted sellers\n"
+        "✅ <b>Get Verified</b> — Request verified badge\n"
+        "🤝 <b>My Deals</b> — Your active deals\n"
+        "🏅 <b>Badges</b> — Badge milestones\n\n"
         "Commands:\n"
-        "`/review @seller <1-5> <comment>`\n"
-        "`/profile @user` — View someone's profile\n"
-        "`/deal @buyer @seller <amount>` — New deal\n"
-        "`/dealcomplete <id>` — Confirm deal done\n"
-        "`/canceldeal <id>` — Cancel a deal\n"
-        "`/delist <id>` — Remove your listing\n"
-        "`/verified` — List verified sellers\n"
+        "<code>/review @seller 1-5 comment</code>\n"
+        "<code>/profile @user</code> — View someone's profile\n"
+        "<code>/deal @buyer @seller amount</code> — New deal\n"
+        "<code>/dealcomplete id</code> — Confirm deal done\n"
+        "<code>/canceldeal id</code> — Cancel a deal\n"
+        "<code>/delist id</code> — Remove your listing\n"
+        "<code>/verified</code> — List verified sellers\n"
     )
     if is_adm:
-        text += "\n⚙️ Tap *Admin Panel* for admin tools."
-
-    is_adm_full = await is_admin(update.effective_user.id, context)
-    await edit_or_reply(update, text, parse_mode="Markdown", reply_markup=main_menu(is_adm_full))
+        text += "\n⚙️ Tap <b>Admin Panel</b> for admin tools."
+    await edit_or_reply(update, text, parse_mode="HTML", reply_markup=main_menu(is_adm))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -515,11 +515,12 @@ async def add_trust_vote(voter_id: int, seller_id: int) -> str:
         existing = supabase.table("trust_votes").select("id").eq("voter_id", voter_id).eq("seller_id", seller_id).execute()
         if existing.data:
             return "already_voted"
-        # Verify completed deal exists
-        deal = supabase.table("deals").select("id").eq("status", "completed").or_(
-            f"and(buyer_id.eq.{voter_id},seller_id.eq.{seller_id}),and(buyer_id.eq.{seller_id},seller_id.eq.{voter_id})"
-        ).execute()
-        if not deal.data:
+        # Verify completed deal exists (voter was buyer OR seller in a deal with the seller)
+        d1 = supabase.table("deals").select("id").eq("status", "completed") \
+                     .eq("buyer_id", voter_id).eq("seller_id", seller_id).limit(1).execute()
+        d2 = supabase.table("deals").select("id").eq("status", "completed") \
+                     .eq("buyer_id", seller_id).eq("seller_id", voter_id).limit(1).execute()
+        if not d1.data and not d2.data:
             return "no_deal"
         try:
             supabase.table("trust_votes").insert({"voter_id": voter_id, "seller_id": seller_id}).execute()
@@ -630,6 +631,70 @@ async def delete_custom_emoji(fallback: str) -> bool:
         return await asyncio.to_thread(_del)
     except Exception as e:
         logger.error(f"delete_custom_emoji error: {e}")
+        return False
+
+
+async def get_card_cooldown(user_id: int) -> Optional[datetime]:
+    """Return the last card post time for rate-limiting mycard."""
+    def _get():
+        res = get_supabase().table("members").select("card_last_posted").eq("user_id", user_id).execute()
+        if not res.data:
+            return None
+        val = res.data[0].get("card_last_posted")
+        if not val:
+            return None
+        return datetime.fromisoformat(val.replace("Z", "+00:00"))
+    try:
+        return await asyncio.to_thread(_get)
+    except Exception as e:
+        logger.error(f"get_card_cooldown error: {e}")
+        return None
+
+
+async def set_card_cooldown(user_id: int) -> None:
+    """Record that the user just posted their card."""
+    from datetime import timezone as tz
+    now = datetime.now(tz.utc).isoformat()
+    await update_member(user_id, card_last_posted=now)
+
+
+async def record_deal_confirmation(deal_id: int, user_id: int, buyer_id: int, seller_id: int) -> bool:
+    """Persist deal completion confirmation. Returns True when BOTH parties confirmed."""
+    def _record():
+        supabase = get_supabase()
+        if user_id == buyer_id:
+            supabase.table("deals").update({"buyer_confirmed": True}).eq("id", deal_id).execute()
+        elif user_id == seller_id:
+            supabase.table("deals").update({"seller_confirmed": True}).eq("id", deal_id).execute()
+        deal = supabase.table("deals").select("buyer_confirmed, seller_confirmed").eq("id", deal_id).execute()
+        if not deal.data:
+            return False
+        d = deal.data[0]
+        return bool(d.get("buyer_confirmed")) and bool(d.get("seller_confirmed"))
+    try:
+        return await asyncio.to_thread(_record)
+    except Exception as e:
+        logger.error(f"record_deal_confirmation error: {e}")
+        return False
+
+
+async def record_cancel_request(deal_id: int, user_id: int, buyer_id: int, seller_id: int) -> bool:
+    """Persist cancel request. Returns True when BOTH parties requested."""
+    def _record():
+        supabase = get_supabase()
+        if user_id == buyer_id:
+            supabase.table("deals").update({"buyer_cancel_requested": True}).eq("id", deal_id).execute()
+        elif user_id == seller_id:
+            supabase.table("deals").update({"seller_cancel_requested": True}).eq("id", deal_id).execute()
+        deal = supabase.table("deals").select("buyer_cancel_requested, seller_cancel_requested").eq("id", deal_id).execute()
+        if not deal.data:
+            return False
+        d = deal.data[0]
+        return bool(d.get("buyer_cancel_requested")) and bool(d.get("seller_cancel_requested"))
+    try:
+        return await asyncio.to_thread(_record)
+    except Exception as e:
+        logger.error(f"record_cancel_request error: {e}")
         return False
 
 
