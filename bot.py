@@ -31,6 +31,7 @@ import pytz
 from config import (
     BOT_TOKEN,
     GROUP_ID,
+    GROUP_INVITE_LINK,
     ADMIN_IDS,
     IST,
     CAPTCHA_TIMEOUT,
@@ -315,6 +316,20 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
     username = user.username or user.full_name
 
     await get_or_create_member(user_id, user.username or "", user.full_name or "")
+
+    # Credit referral when referred user joins the group (not on bot start)
+    member = await get_member(user_id)
+    referred_by = member.get("referred_by") if member else None
+    if referred_by and referred_by != user_id:
+        old_count = await get_referral_count(referred_by)
+        new_count = await add_referral(referred_by, user_id)
+        if new_count:
+            referrer = await get_member(referred_by)
+            referrer_username = referrer.get("username", "") if referrer else ""
+            await check_and_update_badge(
+                referred_by, old_count, new_count,
+                context.bot, GROUP_ID, referrer_username,
+            )
 
     try:
         await context.bot.restrict_chat_member(chat_id=GROUP_ID, user_id=user_id, permissions=MUTED)
@@ -721,22 +736,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await get_or_create_member(user.id, user.username or "", user.full_name or "", referred_by)
 
-    if referred_by:
-        old_count = await get_referral_count(referred_by)
-        new_count = await add_referral(referred_by, user.id)
-        if new_count:
-            referrer = await get_member(referred_by)
-            referrer_username = referrer.get("username", "") if referrer else ""
-            await check_and_update_badge(
-                referred_by, old_count, new_count,
-                context.bot, GROUP_ID, referrer_username,
-            )
-
     is_adm = await is_admin(user.id, context)
+    join_line = (
+        f"\n\n👥 Join our community group: {GROUP_INVITE_LINK}"
+        if GROUP_INVITE_LINK else ""
+    )
     text = decorate(
         f"👋 <b>Welcome {h(user.first_name)}!</b>\n\n"
         "🎉 Welcome to the <b>Trusted Seller</b> community!\n\n"
         "✨ Tap a button below to get started 👇"
+        f"{join_line}"
     )
     await update.effective_chat.send_message(
         text,

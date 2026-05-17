@@ -8,6 +8,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 GROUP_ID = int(os.getenv("GROUP_ID", "0"))
+GROUP_INVITE_LINK = os.getenv("GROUP_INVITE_LINK", "")
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 IST = pytz.timezone("Asia/Kolkata")
