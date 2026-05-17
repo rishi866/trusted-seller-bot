@@ -937,12 +937,16 @@ async def sell_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def sell_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["sell_tool_name"] = update.message.text.strip()
-    await update.message.reply_text("💰 What is the price? (e.g. 500 or 400-600)")
+    await update.message.reply_text("💰 What is the price in USD? (e.g. 10 or 5-20)")
     return SELL_PRICE
 
 
 async def sell_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["sell_price"] = update.message.text.strip()
+    raw = update.message.text.strip().lstrip("$").strip()
+    if not re.match(r"^\d+(\.\d+)?(-\d+(\.\d+)?)?$", raw):
+        await update.message.reply_text("❌ Please enter a valid numeric price (e.g. 10 or 5-20).")
+        return SELL_PRICE
+    context.user_data["sell_price"] = raw
     await update.message.reply_text(
         "📝 Write a description — features, condition, what's included, etc."
     )
@@ -1006,7 +1010,7 @@ async def _finalize_sell(update, context, user, file_id):
         "🔥 <b>NEW LISTING — SELL</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"🛒 Tool: {h(tool_name)}\n"
-        f"💰 Price: ₹{h(price)}\n"
+        f"💰 Price: ${h(price)}\n"
         f"📝 {entities_to_html(description, desc_ents)}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 Seller: {h(uname_str)} {verified_tag}\n"
@@ -1058,12 +1062,16 @@ async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def buy_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["buy_tool_name"] = update.message.text.strip()
-    await update.message.reply_text("💰 What is your budget? (e.g. 500)")
+    await update.message.reply_text("💰 What is your budget in USD? (e.g. 20)")
     return BUY_BUDGET
 
 
 async def buy_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["buy_budget"] = update.message.text.strip()
+    raw = update.message.text.strip().lstrip("$").strip()
+    if not re.match(r"^\d+(\.\d+)?(-\d+(\.\d+)?)?$", raw):
+        await update.message.reply_text("❌ Please enter a valid numeric budget (e.g. 20).")
+        return BUY_BUDGET
+    context.user_data["buy_budget"] = raw
     await update.message.reply_text(
         "📋 Any specific requirements? (version, duration, features) — or type /skip"
     )
@@ -1107,7 +1115,7 @@ async def _finalize_buy(update, context, requirement, req_ents=None):
         "🛍️ <b>BUY REQUEST</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔍 Tool: {h(tool_name)}\n"
-        f"💰 Budget: ₹{h(budget)}\n"
+        f"💰 Budget: ${h(budget)}\n"
         f"📋 Requirement: {entities_to_html(requirement, req_ents or [])}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 Buyer: {h(uname_str)}\n"
@@ -1160,7 +1168,7 @@ async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     for i, r in enumerate(results[:10]):
         t     = "🔥 SELL" if r["type"] == "sell" else "🛍️ BUY"
         uname = f"@{r['username']}" if r.get("username") else r.get("full_name", "?")
-        lines.append(f"{i+1}. {t} | <b>{h(r['tool_name'])}</b> | ₹{h(r.get('price','?'))} | {h(uname)}")
+        lines.append(f"{i+1}. {t} | <b>{h(r['tool_name'])}</b> | ${h(r.get('price','?'))} | {h(uname)}")
         rows.append([_btn(
             f"👤 {uname} — {r['tool_name'][:22]}",
             callback_data=f"profile_{r['user_id']}",
@@ -1194,7 +1202,7 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, r in enumerate(results[:10]):
         t     = "🔥 SELL" if r["type"] == "sell" else "🛍️ BUY"
         uname = f"@{r['username']}" if r.get("username") else r.get("full_name", "?")
-        lines.append(f"{i+1}. {t} | <b>{h(r['tool_name'])}</b> | ₹{h(r.get('price','?'))} | {h(uname)}")
+        lines.append(f"{i+1}. {t} | <b>{h(r['tool_name'])}</b> | ${h(r.get('price','?'))} | {h(uname)}")
         rows.append([_btn(
             f"👤 {uname} — {r['tool_name'][:22]}",
             callback_data=f"profile_{r['user_id']}",
@@ -1227,7 +1235,7 @@ async def mylistings(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 exp_str = f" | ⏳ {days}d left"
             except Exception:
                 pass
-        lines.append(f"• <b>#{r['id']}</b> | {t} | {h(r['tool_name'])} | ₹{h(r.get('price','?'))}{exp_str}")
+        lines.append(f"• <b>#{r['id']}</b> | {t} | {h(r['tool_name'])} | ${h(r.get('price','?'))}{exp_str}")
     lines.append("\nTo remove: <code>/delist &lt;id&gt;</code>")
     await edit_or_reply(update, decorate("\n".join(lines)), parse_mode="HTML", reply_markup=back_home())
 
@@ -1780,7 +1788,7 @@ async def _build_seller_card_text(member: dict) -> str:
         text += "🛒 <b>Active Listings:</b>\n"
         for lst in listings[:5]:
             ltype = "🔥 SELL" if lst.get("type") == "sell" else "🛍️ BUY"
-            price = f"₹{lst['price']}" if lst.get("price") else "Price on ask"
+            price = f"${lst['price']}" if lst.get("price") else "Price on ask"
             text += f"• {ltype} <b>{h(lst.get('tool_name','?'))}</b> — {h(price)}\n"
         if len(listings) > 5:
             text += f"  <i>...and {len(listings)-5} more</i>\n"
@@ -1894,7 +1902,7 @@ async def deal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤝 <b>New Deal Proposal!</b>\n\n"
         f"🆔 Deal ID: #{deal_id}\n"
         f"🛒 Tool: {h(tool_name)}\n"
-        f"💰 Amount: ₹{amount}\n"
+        f"💰 Amount: ${amount}\n"
         f"👤 Buyer: @{h(buyer_username)}\n"
         f"🏪 Seller: @{h(seller_username)}\n\n"
         "Both parties must accept for the deal to go active!"
@@ -2094,7 +2102,7 @@ async def mydeals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = decorate(
             f"📋 <b>Deal #{d['id']}</b>\n"
             f"🛒 Tool: {h(d['tool_name'])}\n"
-            f"💰 Amount: ₹{d['amount']}\n"
+            f"💰 Amount: ${d['amount']}\n"
             f"👤 Role: {role}\n"
             f"📊 Status: {d['status']}"
         )
