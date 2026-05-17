@@ -116,3 +116,55 @@ def h(text: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+
+
+def entities_to_html(text: str, entities) -> str:
+    """Convert Telegram message text + entities list to HTML.
+
+    Preserves custom_emoji (animated), bold, italic, underline,
+    strikethrough, spoiler, and code entities. Everything else is
+    HTML-escaped plain text. Handles emoji whose codepoints sit above
+    U+FFFF (they count as 2 UTF-16 units in Telegram offsets).
+    """
+    if not entities:
+        return h(text)
+
+    # Build UTF-16 offset → Python string index mapping
+    utf16_to_idx: dict[int, int] = {}
+    utf16_pos = 0
+    for idx, ch in enumerate(text):
+        utf16_to_idx[utf16_pos] = idx
+        utf16_pos += 2 if ord(ch) > 0xFFFF else 1
+    utf16_to_idx[utf16_pos] = len(text)
+
+    result: list[str] = []
+    prev_end = 0
+
+    for ent in sorted(entities, key=lambda e: e.offset):
+        start = utf16_to_idx.get(ent.offset, ent.offset)
+        end   = utf16_to_idx.get(ent.offset + ent.length, ent.offset + ent.length)
+        result.append(h(text[prev_end:start]))
+        chunk = text[start:end]
+        et = ent.type
+
+        if et == "custom_emoji":
+            cid = getattr(ent, "custom_emoji_id", "") or ""
+            result.append(f'<tg-emoji emoji-id="{cid}">{h(chunk)}</tg-emoji>')
+        elif et == "bold":
+            result.append(f"<b>{h(chunk)}</b>")
+        elif et == "italic":
+            result.append(f"<i>{h(chunk)}</i>")
+        elif et == "underline":
+            result.append(f"<u>{h(chunk)}</u>")
+        elif et == "strikethrough":
+            result.append(f"<s>{h(chunk)}</s>")
+        elif et == "code":
+            result.append(f"<code>{h(chunk)}</code>")
+        elif et == "spoiler":
+            result.append(f'<span class="tg-spoiler">{h(chunk)}</span>')
+        else:
+            result.append(h(chunk))
+        prev_end = end
+
+    result.append(h(text[prev_end:]))
+    return "".join(result)

@@ -91,7 +91,7 @@ from keyboards import (
     admin_panel_kb,
 )
 import emoji_fx
-from emoji_fx import decorate, h
+from emoji_fx import decorate, h, entities_to_html
 
 logger = logging.getLogger(__name__)
 
@@ -845,7 +845,8 @@ async def sell_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def sell_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["sell_description"] = update.message.text.strip()
+    context.user_data["sell_description"] = update.message.text or ""
+    context.user_data["sell_desc_entities"] = list(update.message.entities or [])
     await update.message.reply_text(
         "📸 Send a screenshot or photo (optional).\nType /skip if you don't want one."
     )
@@ -868,9 +869,10 @@ async def sell_skip_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _finalize_sell(update, context, user, file_id):
-    tool_name   = context.user_data.get("sell_tool_name", "")
-    price       = context.user_data.get("sell_price", "")
-    description = context.user_data.get("sell_description", "")
+    tool_name    = context.user_data.get("sell_tool_name", "")
+    price        = context.user_data.get("sell_price", "")
+    description  = context.user_data.get("sell_description", "")
+    desc_ents    = context.user_data.get("sell_desc_entities", [])
 
     listing = await create_listing(
         user_id=user.id, username=user.username or "",
@@ -891,7 +893,7 @@ async def _finalize_sell(update, context, user, file_id):
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"🛒 Tool: {h(tool_name)}\n"
         f"💰 Price: ₹{h(price)}\n"
-        f"📝 {h(description)}\n"
+        f"📝 {entities_to_html(description, desc_ents)}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 Seller: {h(uname_str)} {verified_tag}\n"
         f"📅 Posted: {date_str}\n"
@@ -955,19 +957,22 @@ async def buy_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def buy_req(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    req = update.message.text.strip()
-    if req == "/skip":
+    req = update.message.text or ""
+    if req.strip() == "/skip":
         req = "No specific requirements"
-    await _finalize_buy(update, context, req)
+        ents = []
+    else:
+        ents = list(update.message.entities or [])
+    await _finalize_buy(update, context, req, ents)
     return ConversationHandler.END
 
 
 async def buy_skip_req(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _finalize_buy(update, context, "No specific requirements")
+    await _finalize_buy(update, context, "No specific requirements", [])
     return ConversationHandler.END
 
 
-async def _finalize_buy(update, context, requirement):
+async def _finalize_buy(update, context, requirement, req_ents=None):
     user      = update.effective_user
     tool_name = context.user_data.get("buy_tool_name", "")
     budget    = context.user_data.get("buy_budget", "")
@@ -989,7 +994,7 @@ async def _finalize_buy(update, context, requirement):
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔍 Tool: {h(tool_name)}\n"
         f"💰 Budget: ₹{h(budget)}\n"
-        f"📋 Requirement: {h(requirement)}\n"
+        f"📋 Requirement: {entities_to_html(requirement, req_ents or [])}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 Buyer: {h(uname_str)}\n"
         f"📅 Posted: {date_str}\n"
