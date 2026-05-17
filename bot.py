@@ -363,7 +363,7 @@ async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=GROUP_ID,
                 text=decorate(
-                    f"✅ <b>Welcome to AI Tools Buy/Sell, {h(username_display(voter))}!</b> 🎉\n"
+                    f"✅ <b>Welcome to Trusted Seller, {h(username_display(voter))}!</b> 🎉\n"
                     "📋 Read the rules, explore listings, and enjoy trading! 🚀"
                 ),
                 parse_mode="HTML",
@@ -683,7 +683,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_adm = await is_admin(user.id, context)
     text = decorate(
         f"👋 <b>Welcome {h(user.first_name)}!</b>\n\n"
-        "🎉 Welcome to the <b>AI Tools Buy/Sell</b> community!\n\n"
+        "🎉 Welcome to the <b>Trusted Seller</b> community!\n\n"
         "✨ Tap a button below to get started 👇"
     )
     await update.effective_chat.send_message(
@@ -1338,7 +1338,7 @@ async def daily_morning_post(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=GROUP_ID,
             text=decorate(
-                "🌅 <b>Good Morning, AI Tools Buy/Sell Community!</b> ☀️\n\n"
+                "🌅 <b>Good Morning, Trusted Seller Community!</b> ☀️\n\n"
                 f"Today's active listings:\n"
                 f"🔥 Sell: {sell_count}\n"
                 f"🛍️ Buy: {buy_count}\n\n"
@@ -2358,7 +2358,7 @@ async def trust_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_adm = await is_admin(update.effective_user.id, context)
     text = decorate(
-        "📖 <b>AI Tools Buy/Sell Bot</b>\n\n"
+        "📖 <b>Trusted Seller</b>\n\n"
         "Tap buttons in the main menu to navigate, or use commands:\n\n"
         "🛒 <b>Sell</b> — Create a sell listing\n"
         "🛍️ <b>Buy</b> — Post a buy request\n"
@@ -2373,14 +2373,28 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ <b>Get Verified</b> — Request verified badge\n"
         "🤝 <b>My Deals</b> — Your active deals\n"
         "🏅 <b>Badges</b> — Badge milestones\n\n"
-        "Commands:\n"
-        "<code>/review @seller 1-5 comment</code>\n"
-        "<code>/profile @user</code> — View someone's profile\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "💬 <b>DM Commands</b> (use in bot DM):\n"
+        "<code>/sell</code> — Create a sell listing\n"
+        "<code>/buy</code> — Post a buy request\n"
+        "<code>/search keyword</code> — Search listings\n"
+        "<code>/mylistings</code> — Your active listings\n"
+        "<code>/mydeals</code> — Your deals\n"
+        "<code>/profile [@user]</code> — View a profile\n"
+        "<code>/card @user</code> — View seller card\n"
+        "<code>/mycard</code> — Post your spotlight card\n"
+        "<code>/mylink</code> — Your referral link\n"
+        "<code>/mystats</code> — Referral stats\n"
+        "<code>/verify</code> — Request verification\n"
+        "<code>/delist id</code> — Remove a listing\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "👥 <b>Group Commands</b> (work in group &amp; DM):\n"
+        "<code>/card @user</code> — View any seller's card\n"
         "<code>/deal @buyer @seller amount</code> — New deal\n"
         "<code>/dealcomplete id</code> — Confirm deal done\n"
         "<code>/canceldeal id</code> — Cancel a deal\n"
         "<code>/dispute id reason</code> — Raise dispute to admins\n"
-        "<code>/delist id</code> — Remove your listing\n"
+        "<code>/review @seller 1-5 comment</code> — Leave a review\n"
         "<code>/verified</code> — List verified sellers\n"
     )
     if is_adm:
