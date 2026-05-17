@@ -1588,7 +1588,7 @@ async def review_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=seller_id,
             text=decorate(
                 f"⭐ <b>New Review!</b>\n\n"
-                f"{h(reviewer_name)} ne review diya:\n"
+                f"{h(reviewer_name)} left a review:\n"
                 f"{stars} ({rating}/5)\n"
                 f"📝 {h(comment)}"
             ),
@@ -2150,9 +2150,9 @@ async def dispute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=other_id,
             text=decorate(
                 f"🚨 <b>Deal #{deal_id} Disputed</b>\n\n"
-                f"{h(reporter_name)} ne dispute raise kiya hai.\n"
+                f"{h(reporter_name)} has raised a dispute.\n"
                 f"📝 Reason: {h(reason)}\n\n"
-                "Admins ko notify kar diya gaya hai."
+                "Admins have been notified."
             ),
             parse_mode="HTML",
         )
@@ -2162,7 +2162,7 @@ async def dispute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         decorate(
             f"✅ <b>Dispute raised for Deal #{deal_id}</b>\n\n"
-            "Admins ko alert bhej diya gaya hai. Jaldi review hoga."
+            "Admins have been alerted and will review shortly."
         ),
         parse_mode="HTML",
         reply_markup=back_home(),
@@ -2288,8 +2288,8 @@ async def review_prompt_callback(update: Update, context: ContextTypes.DEFAULT_T
         decorate(
             f"⭐ <b>Leave a Review for {h(uname)}</b>\n\n"
             "Use the command below:\n\n"
-            f"<code>/review {h(uname)} 5 Acha seller hai, fast delivery!</code>\n\n"
-            "Rating 1–5 de sakte ho. Comment required hai."
+            f"<code>/review {h(uname)} 5 Great seller, fast delivery!</code>\n\n"
+            "Give a rating from 1–5. A comment is required."
         ),
         parse_mode="HTML",
         reply_markup=back_home(),
@@ -2342,7 +2342,7 @@ async def trust_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=seller_id,
                 text=decorate(
                     f"👍 <b>New Trust Vote!</b>\n\n"
-                    f"{h(voter_name)} ne tumhe trust vote diya.\n"
+                    f"{h(voter_name)} gave you a trust vote.\n"
                     f"🏆 Total Trust Votes: <b>{new_trust}</b>"
                 ),
                 parse_mode="HTML",
@@ -2406,10 +2406,10 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=query.from_user.id,
                 text=decorate(
-                    "👋 <b>Bot ka menu DM mein use karo!</b>\n\n"
-                    "Group mein sirf <code>/card</code>, <code>/deal</code>, "
-                    "<code>/review</code>, <code>/dispute</code> commands work karte hain.\n\n"
-                    "Menu ke liye DM mein /start likho."
+                    "👋 <b>Use the bot menu in DM!</b>\n\n"
+                    "In groups, only <code>/card</code>, <code>/deal</code>, "
+                    "<code>/review</code>, and <code>/dispute</code> commands work.\n\n"
+                    "Send /start to the bot in DM to access the full menu."
                 ),
                 parse_mode="HTML",
                 reply_markup=back_home(),
@@ -2417,7 +2417,7 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("📬 Check your DM!", show_alert=True)
         except TelegramError:
             await query.answer(
-                "Bot ko DM mein /start karo pehle!",
+                "Please start the bot in DM first — send /start privately.",
                 show_alert=True,
             )
         return
@@ -2427,7 +2427,7 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_adm = await is_admin(query.from_user.id, context)
             if is_group:
                 # In group — just show a popup, don't edit the group message
-                await query.answer("Bot ka full menu DM mein /start karo!", show_alert=True)
+                await query.answer("Use /start in DM to access the full menu!", show_alert=True)
                 return
             await edit_or_reply(
                 update,
