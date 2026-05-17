@@ -533,25 +533,91 @@ async def refresh_scam_words_job(context: ContextTypes.DEFAULT_TYPE):
 
 # ── Emoji Capture ─────────────────────────────────────────────────────────────
 
+_PACK_LINK_RE = re.compile(
+    r"(?:https?://)?t\.me/(?:addemoji|addstickers)/(\w+)", re.IGNORECASE
+)
+
+
+async def _fetch_from_pack(bot, pack_name: str) -> tuple[int, list[str]]:
+    """Fetch all custom emoji from a Telegram emoji pack by set name."""
+    from db import save_custom_emoji
+    try:
+        sticker_set = await bot.get_sticker_set(pack_name)
+    except TelegramError as e:
+        return 0, [f"Error: {e}"]
+
+    saved = 0
+    details = []
+    for sticker in sticker_set.stickers:
+        custom_id = getattr(sticker, "custom_emoji_id", None)
+        fallback  = sticker.emoji or ""
+        if not custom_id or not fallback:
+            continue
+        keyword = emoji_fx.KEYWORD_HINTS.get(fallback, "")
+        ok = await save_custom_emoji(fallback, custom_id, keyword)
+        if ok:
+            saved += 1
+            details.append(fallback)
+
+    if saved:
+        await emoji_fx.reload()
+    return saved, details
+
+
 async def emoji_capture_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Capture custom animated emoji IDs from admin's message."""
+    """Capture custom animated emoji — from pack link OR direct emoji in message."""
     user = update.effective_user
     if context.bot_data.get("emoji_capture_admin") != user.id:
         return  # not in capture mode for this user
 
-    msg      = update.effective_message
-    entities = list(msg.entities or []) + list(msg.caption_entities or [])
-    text     = msg.text or msg.caption or ""
+    msg  = update.effective_message
+    text = msg.text or msg.caption or ""
 
+    # ── Case 1: admin sent a pack link ────────────────────────────────────────
+    match = _PACK_LINK_RE.search(text)
+    if match:
+        pack_name = match.group(1)
+        await msg.reply_text(f"⏳ Fetching emoji pack <b>{pack_name}</b>…", parse_mode="HTML")
+        saved, details = await _fetch_from_pack(context.bot, pack_name)
+
+        context.bot_data.pop("emoji_capture_admin", None)
+
+        if saved == 0:
+            err = details[0] if details else "Pack not found or no custom emoji in it."
+            await msg.reply_text(
+                f"❌ <b>Could not fetch pack.</b>\n\n{h(err)}\n\n"
+                "Make sure the pack is an <b>emoji pack</b> (not a sticker pack) "
+                "and the link is correct.",
+                parse_mode="HTML",
+                reply_markup=admin_panel_kb(),
+            )
+        else:
+            detail_str = "  ".join(details[:30])
+            more = f" (+{len(details)-30} more)" if len(details) > 30 else ""
+            await msg.reply_text(
+                f"✅ <b>Fetched {saved} emoji from pack!</b>\n\n"
+                f"{detail_str}{more}\n\n"
+                "All animated now in bot messages. ✨",
+                parse_mode="HTML",
+                reply_markup=admin_panel_kb(),
+            )
+        return
+
+    # ── Case 2: admin typed / forwarded message with custom emoji ─────────────
+    from db import save_custom_emoji
+    entities    = list(msg.entities or []) + list(msg.caption_entities or [])
     custom_ents = [e for e in entities if e.type == "custom_emoji"]
+
     if not custom_ents:
         await msg.reply_text(
-            "❌ No custom emoji found!\n\nSend a message that contains animated/custom emoji.",
-            reply_markup=admin_panel_kb(),
+            "❌ <b>Nothing captured.</b>\n\n"
+            "Send either:\n"
+            "• A pack link — <code>https://t.me/addemoji/PackName</code>\n"
+            "• A message containing custom animated emoji",
+            parse_mode="HTML",
         )
         return
 
-    from db import save_custom_emoji
     saved = 0
     details = []
     for ent in custom_ents:
@@ -561,8 +627,7 @@ async def emoji_capture_handler(update: Update, context: ContextTypes.DEFAULT_TY
         ok = await save_custom_emoji(fallback, custom_id, keyword)
         if ok:
             saved += 1
-            kw_tag = f" ({keyword})" if keyword else ""
-            details.append(f"{fallback}{kw_tag}")
+            details.append(fallback)
 
     await emoji_fx.reload()
     context.bot_data.pop("emoji_capture_admin", None)
