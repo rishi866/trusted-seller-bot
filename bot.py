@@ -220,6 +220,54 @@ async def post_seller_card(bot, seller_id: int, chat_id: int):
         logger.error(f"post_seller_card error: {e}")
 
 
+async def _set_member_title(bot, user_id: int, title: str) -> bool:
+    """Promote user with zero admin permissions and set a custom title."""
+    try:
+        await bot.promote_chat_member(
+            chat_id=GROUP_ID,
+            user_id=user_id,
+            can_manage_chat=True,   # minimum required to hold a title
+            can_delete_messages=False,
+            can_manage_video_chats=False,
+            can_restrict_members=False,
+            can_promote_members=False,
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+            is_anonymous=False,
+        )
+        await bot.set_chat_administrator_custom_title(
+            chat_id=GROUP_ID,
+            user_id=user_id,
+            custom_title=title[:16],  # Telegram max 16 chars
+        )
+        return True
+    except TelegramError as e:
+        logger.error(f"_set_member_title error for {user_id}: {e}")
+        return False
+
+
+async def _remove_member_title(bot, user_id: int) -> bool:
+    """Revoke the zero-permission admin role (removes custom title)."""
+    try:
+        await bot.promote_chat_member(
+            chat_id=GROUP_ID,
+            user_id=user_id,
+            can_manage_chat=False,
+            can_delete_messages=False,
+            can_manage_video_chats=False,
+            can_restrict_members=False,
+            can_promote_members=False,
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+        )
+        return True
+    except TelegramError as e:
+        logger.error(f"_remove_member_title error for {user_id}: {e}")
+        return False
+
+
 async def check_and_update_badge(user_id, old_count, new_count, bot, chat_id, username):
     all_badges = await get_all_badges()
     earned = None
@@ -228,6 +276,9 @@ async def check_and_update_badge(user_id, old_count, new_count, bot, chat_id, us
             earned = b
     if earned:
         await update_member(user_id, badge=earned["badge_name"])
+        # Auto-set Telegram group title if this is a title tier
+        if earned.get("is_admin_level"):
+            await _set_member_title(bot, user_id, earned["badge_name"])
         try:
             await bot.send_message(
                 chat_id=chat_id,
@@ -235,6 +286,7 @@ async def check_and_update_badge(user_id, old_count, new_count, bot, chat_id, us
                     f"🎉 Congratulations @{h(username)}!\n"
                     f"You earned the <b>{h(earned['badge_name'])}</b> badge! 🏆\n"
                     f"Total Referrals: {new_count}"
+                    + (f"\n🏷️ Your group title has been updated to <b>{h(earned['badge_name'])}</b>!" if earned.get("is_admin_level") else "")
                 ),
                 parse_mode="HTML",
             )
@@ -784,6 +836,50 @@ async def removebadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Badge removed for count <b>{count}</b>.", parse_mode="HTML")
     else:
         await update.message.reply_text("❌ Error removing badge.")
+
+
+async def settitle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/settitle <referral_count> <title> — set auto group title at referral milestone."""
+    if not await is_admin(update.effective_user.id, context):
+        return await update.message.reply_text("❌ Admins only.")
+    args = context.args
+    if not args or len(args) < 2:
+        return await update.message.reply_text(
+            "Usage: <code>/settitle &lt;referral_count&gt; &lt;title&gt;</code>\n"
+            "Example: <code>/settitle 10 Trusted Seller</code>\n\n"
+            "Max title length: 16 characters.",
+            parse_mode="HTML",
+        )
+    try:
+        count = int(args[0])
+    except ValueError:
+        return await update.message.reply_text("❌ Count must be a number.")
+    title = " ".join(args[1:])[:16]
+    ok = await set_badge_config(count, title, is_admin_level=True)
+    if ok:
+        await update.message.reply_text(
+            decorate(f"✅ Title tier set: <b>{count}</b> referrals → 🏷️ <b>{h(title)}</b>\n\nMembers who reach this milestone will automatically get this group title."),
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text("❌ Error saving title tier.")
+
+
+async def removetitle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/removetitle <referral_count> — remove a title tier."""
+    if not await is_admin(update.effective_user.id, context):
+        return await update.message.reply_text("❌ Admins only.")
+    if not context.args:
+        return await update.message.reply_text("Usage: <code>/removetitle &lt;referral_count&gt;</code>", parse_mode="HTML")
+    try:
+        count = int(context.args[0])
+    except ValueError:
+        return await update.message.reply_text("❌ Count must be a number.")
+    ok = await remove_badge_config(count)
+    if ok:
+        await update.message.reply_text(f"✅ Title tier removed for <b>{count}</b> referrals.", parse_mode="HTML")
+    else:
+        await update.message.reply_text("❌ No title tier found at that count.")
 
 
 async def badges(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1432,15 +1528,17 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "approve":
         ok = await set_verified(target_user_id, admin.id)
         if ok:
+            await _set_member_title(context.bot, target_user_id, "Trusted Seller")
             try:
                 await context.bot.send_message(
                     chat_id=target_user_id,
-                    text=decorate("🎉 Congratulations! You are now a <b>Verified Seller</b>! ✅"),
+                    text=decorate("🎉 Congratulations! You are now a <b>Verified Seller</b>! ✅\n🏷️ Your group title has been set to <b>Trusted Seller</b>."),
                     parse_mode="HTML",
                 )
                 await context.bot.send_message(
                     chat_id=GROUP_ID,
-                    text="🎊 A new Verified Seller has joined the community! ✅",
+                    text=decorate("🎊 A new <b>Verified Seller</b> has joined the community! ✅"),
+                    parse_mode="HTML",
                 )
             except TelegramError:
                 pass
@@ -1480,16 +1578,17 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Usage: /approve @username or reply to a message")
     ok = await set_verified(target_id, update.effective_user.id)
     if ok:
+        await _set_member_title(context.bot, target_id, "Trusted Seller")
         try:
             await context.bot.send_message(
                 chat_id=target_id,
-                text=decorate("🎉 You are now a <b>Verified Seller</b>! ✅"),
+                text=decorate("🎉 You are now a <b>Verified Seller</b>! ✅\n🏷️ Your group title has been set to <b>Trusted Seller</b>."),
                 parse_mode="HTML",
             )
             await context.bot.send_message(chat_id=GROUP_ID, text=decorate(f"🎊 <b>{h(target_name)}</b> is now a Verified Seller! ✅"), parse_mode="HTML")
         except TelegramError:
             pass
-        await update.message.reply_text(f"✅ {target_name} verified!")
+        await update.message.reply_text(f"✅ {target_name} verified and titled!")
     else:
         await update.message.reply_text("❌ Verification failed.")
 
@@ -1506,15 +1605,16 @@ async def unverify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not member.get("is_verified"):
         return await update.message.reply_text(f"⚠️ {target_name} is not verified.")
     await update_member(target_id, is_verified=False)
+    await _remove_member_title(context.bot, target_id)
     try:
         await context.bot.send_message(
             chat_id=target_id,
-            text=decorate("⚠️ <b>Your verified status has been removed by an admin.</b>"),
+            text=decorate("⚠️ <b>Your verified status and group title have been removed by an admin.</b>"),
             parse_mode="HTML",
         )
     except TelegramError:
         pass
-    await update.message.reply_text(f"✅ {target_name} unverified.")
+    await update.message.reply_text(f"✅ {target_name} unverified and title removed.")
 
 
 async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2571,6 +2671,37 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 "🃏 <b>Seller Card</b>\nUsage: <code>/sellercard @username</code>",
                                 parse_mode="HTML", reply_markup=admin_panel_kb())
 
+        elif data == "adm:titles":
+            if not await is_admin(query.from_user.id, context):
+                await query.answer("Admins only!", show_alert=True)
+                return
+            all_badges = await get_all_badges()
+            title_tiers = [b for b in all_badges if b.get("is_admin_level")]
+            if title_tiers:
+                lines = ["🏷️ <b>Auto Title Tiers</b>\n"]
+                for t in sorted(title_tiers, key=lambda x: x["required_count"]):
+                    lines.append(f"• <b>{t['required_count']}</b> referrals → 🏷️ <b>{h(t['badge_name'])}</b>")
+                lines.append(
+                    "\n<b>Commands:</b>\n"
+                    "<code>/settitle &lt;count&gt; &lt;title&gt;</code> — Add/update tier\n"
+                    "<code>/removetitle &lt;count&gt;</code> — Remove tier\n\n"
+                    "💡 Max title length: 16 characters\n"
+                    "🔔 Members reaching a milestone get the title automatically in the group."
+                )
+            else:
+                lines = [
+                    "🏷️ <b>Auto Title Tiers</b>\n\n"
+                    "No title tiers configured yet.\n\n"
+                    "<b>Set up tiers:</b>\n"
+                    "<code>/settitle 10 Trusted Seller</code>\n"
+                    "<code>/settitle 25 Most Trusted</code>\n"
+                    "<code>/settitle 50 Elite Seller</code>\n"
+                    "<code>/settitle 100 Legend</code>\n\n"
+                    "Members who reach these referral milestones will automatically\n"
+                    "get the corresponding title shown next to their name in the group."
+                ]
+            await edit_or_reply(update, decorate("\n".join(lines)), parse_mode="HTML", reply_markup=admin_panel_kb())
+
         elif data == "adm:emoji":
             if not await is_admin(query.from_user.id, context):
                 await query.answer("Admins only!", show_alert=True)
@@ -2753,9 +2884,11 @@ def main():
     application.add_handler(CommandHandler("reject",      reject_cmd))
     application.add_handler(CommandHandler("sellercard",  sellercard_cmd))
     application.add_handler(CommandHandler("adminpanel",  admin_panel_cmd))
-    application.add_handler(CommandHandler("setbadge",    setbadge))
-    application.add_handler(CommandHandler("editbadge",   editbadge))
-    application.add_handler(CommandHandler("removebadge", removebadge))
+    application.add_handler(CommandHandler("setbadge",     setbadge))
+    application.add_handler(CommandHandler("editbadge",    editbadge))
+    application.add_handler(CommandHandler("removebadge",  removebadge))
+    application.add_handler(CommandHandler("settitle",     settitle_cmd))
+    application.add_handler(CommandHandler("removetitle",  removetitle_cmd))
     application.add_handler(CommandHandler("unverify",    unverify_cmd))
 
     # Global /cancel — fires only when NOT inside a ConversationHandler (group=1)
