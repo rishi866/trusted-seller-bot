@@ -10,6 +10,9 @@ from telegram import (
     ChatPermissions,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     ChatMember,
 )
 from telegram.ext import (
@@ -36,6 +39,7 @@ from config import (
     FLOOD_MSG_COUNT,
     FLOOD_TIME_WINDOW,
     FLOOD_MUTE_DURATION,
+    DEAL_TIMEOUT_HOURS,
     WARNING_LIMIT,
     LOW_RATING_THRESHOLD,
     LOW_RATING_MIN_REVIEWS,
@@ -104,6 +108,26 @@ UNMUTED = ChatPermissions(
 
 SELL_NAME, SELL_PRICE, SELL_DESC, SELL_PHOTO = range(4)
 BUY_NAME, BUY_BUDGET, BUY_REQ = range(4, 7)
+SEARCH_QUERY = 7
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KEYBOARD MENUS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_main_keyboard(is_admin_user: bool = False) -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton("🛒 Sell"), KeyboardButton("🛍️ Buy")],
+        [KeyboardButton("🔍 Search"), KeyboardButton("📋 My Listings")],
+        [KeyboardButton("🔗 My Referral Link"), KeyboardButton("📊 My Stats")],
+        [KeyboardButton("👤 My Profile"), KeyboardButton("🏆 Leaderboard")],
+        [KeyboardButton("⭐ Top Sellers"), KeyboardButton("👑 Trust Ranking")],
+        [KeyboardButton("✅ Get Verified"), KeyboardButton("🤝 My Deals")],
+        [KeyboardButton("🏅 Badges"), KeyboardButton("❓ Help")],
+    ]
+    if is_admin_user:
+        keyboard.append([KeyboardButton("⚙️ Admin Panel")])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
@@ -576,17 +600,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.bot, GROUP_ID, referrer_username
             )
 
+    is_adm = await is_admin(user.id, context)
     await update.message.reply_text(
-        f"👋 Welcome {user.first_name}!\n\n"
+        f"👋 *Welcome {user.first_name}!*\n\n"
         "You've joined the *AI Tools Buy/Sell* community! 🎉\n\n"
-        "Quick Commands:\n"
-        "/sell — Create a sell listing\n"
-        "/buy — Post a buy request\n"
-        "/search — Search listings\n"
-        "/mylink — Get your referral link\n"
-        "/mystats — View your stats\n"
-        "/profile — View your profile\n"
-        "/help — All commands"
+        "Use the keyboard buttons below to navigate all features.\n"
+        "Tap any button to get started! 👇",
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard(is_adm),
     )
 
 
@@ -969,6 +990,39 @@ async def delist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Listing not found or it doesn't belong to you.")
 
 
+# ── Search Conversation (button-triggered) ────────────────────────────────
+
+async def search_button_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Triggered by 🔍 Search keyboard button."""
+    await update.message.reply_text(
+        "🔍 *Search Listings*\n\nType a keyword to search (e.g. ChatGPT, Canva, Adobe):",
+        parse_mode="Markdown",
+    )
+    return SEARCH_QUERY
+
+
+async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle search keyword input after button press."""
+    keyword = update.message.text.strip()
+    results = await search_listings(keyword)
+    if not results:
+        await update.message.reply_text(f"🔍 No listings found for *'{keyword}'*.", parse_mode="Markdown")
+        return ConversationHandler.END
+
+    lines = [f"🔍 *Search Results for '{keyword}':*\n"]
+    for r in results[:10]:
+        t = "🔥 SELL" if r["type"] == "sell" else "🛍️ BUY"
+        uname = f"@{r['username']}" if r.get("username") else "?"
+        lines.append(f"• {t} | {r['tool_name']} | ₹{r.get('price', '?')} | {uname} | #ID{r['id']}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    return ConversationHandler.END
+
+
+async def search_conv_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Search cancelled.")
+    return ConversationHandler.END
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # FEATURE 4 — ADMIN COMMANDS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1137,6 +1191,79 @@ async def sellercard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not target_id:
         return await update.message.reply_text("Usage: /sellercard @username or reply to a message")
     await post_seller_card(context.bot, target_id, GROUP_ID)
+
+
+async def admin_panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show admin panel inline keyboard."""
+    if not await is_admin(update.effective_user.id, context):
+        return await update.message.reply_text("❌ This command is for admins only.")
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📊 Group Stats", callback_data="adm_stats"),
+            InlineKeyboardButton("📢 Announce", callback_data="adm_announce_info"),
+        ],
+        [
+            InlineKeyboardButton("🔨 Ban User", callback_data="adm_ban_info"),
+            InlineKeyboardButton("🔇 Mute User", callback_data="adm_mute_info"),
+        ],
+        [
+            InlineKeyboardButton("⚠️ Warn User", callback_data="adm_warn_info"),
+            InlineKeyboardButton("✅ Approve Seller", callback_data="adm_approve_info"),
+        ],
+        [
+            InlineKeyboardButton("🚫 Scam Words", callback_data="adm_scamwords"),
+            InlineKeyboardButton("🏅 Set Badge", callback_data="adm_badge_info"),
+        ],
+        [
+            InlineKeyboardButton("🃏 Seller Card", callback_data="adm_sellercard_info"),
+        ],
+    ])
+    await update.message.reply_text(
+        "⚙️ *Admin Panel*\n\nTap a button for quick help or use commands directly:",
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
+
+
+async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle admin panel inline button presses."""
+    query = update.callback_query
+    await query.answer()
+
+    if not await is_admin(query.from_user.id, context):
+        await query.answer("Admins only!", show_alert=True)
+        return
+
+    responses = {
+        "adm_announce_info": "📢 *Announce*\nUsage: `/announce <message>`\nSends a DM to all registered members.",
+        "adm_ban_info": "🔨 *Ban User*\nUsage: `/ban @username` or reply to message.",
+        "adm_mute_info": "🔇 *Mute User*\nUsage: `/mute @username <minutes>`\nDefault: 10 minutes.",
+        "adm_warn_info": "⚠️ *Warn User*\nUsage: `/warn @username`\nAuto-bans at warning limit.",
+        "adm_approve_info": "✅ *Approve Seller*\nUsage: `/approve @username`\nGrants verified seller badge.",
+        "adm_badge_info": "🏅 *Set Badge*\nUsage: `/setbadge <count> <name> [admin]`\nExample: `/setbadge 5 Star Seller`",
+        "adm_sellercard_info": "🃏 *Seller Card*\nUsage: `/sellercard @username`\nPosts a spotlight card in the group.",
+    }
+
+    if query.data == "adm_stats":
+        stats = await get_group_stats()
+        text = (
+            "📊 *Group Stats*\n\n"
+            f"👥 Total Members: {stats['total_members']}\n"
+            f"📦 Listings Today: {stats['listings_today']}\n"
+            f"🆕 New Joins Today: {stats['new_joins_today']}"
+        )
+        await query.message.reply_text(text, parse_mode="Markdown")
+        return
+
+    if query.data == "adm_scamwords":
+        words = context.bot_data.get("scam_words_cache", [])
+        word_list = ", ".join(words) if words else "None added yet"
+        text = f"🚫 *Scam Filter Words:*\n`{word_list}`\n\nAdd: `/addword <word>`\nRemove: `/removeword <word>`"
+        await query.message.reply_text(text, parse_mode="Markdown")
+        return
+
+    text = responses.get(query.data, "ℹ️ No info available.")
+    await query.message.reply_text(text, parse_mode="Markdown")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1868,49 +1995,37 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show all commands."""
     is_adm = await is_admin(update.effective_user.id, context)
     text = (
-        "📖 *AI Tools Buy/Sell Bot — Commands*\n\n"
-        "👤 *User Commands:*\n"
-        "/start — Register / start the bot\n"
-        "/sell — Create a sell listing\n"
-        "/buy — Post a buy request\n"
-        "/search <keyword> — Search active listings\n"
-        "/mylistings — View your active listings\n"
-        "/delist <id> — Remove your listing\n"
-        "/mylink — Get your referral link\n"
-        "/mystats — View your referral stats & badge\n"
-        "/badges — View all badge milestones\n"
-        "/leaderboard — Top 10 referrers\n"
-        "/profile — View your profile\n"
-        "/profile @user — View another user's profile\n"
-        "/review @seller <1-5> <comment> — Leave a review\n"
-        "/topsellers — Top sellers by rating\n"
-        "/ranking — Trust vote ranking\n"
-        "/verify — Request verified seller status\n"
-        "/verified — List all verified sellers\n"
-        "/deal @buyer @seller <amount> — Initiate a deal\n"
-        "/mydeals — View your deals\n"
-        "/dealcomplete <id> — Confirm deal completion\n"
-        "/canceldeal <id> — Request deal cancellation\n"
+        "📖 *AI Tools Buy/Sell Bot*\n\n"
+        "Use the keyboard buttons below to navigate, or type commands:\n\n"
+        "🛒 *Sell* — Create a sell listing\n"
+        "🛍️ *Buy* — Post a buy request\n"
+        "🔍 *Search* — Search active listings\n"
+        "📋 *My Listings* — View your listings\n"
+        "🔗 *My Referral Link* — Your referral link\n"
+        "📊 *My Stats* — Referral stats & badge\n"
+        "👤 *My Profile* — View your profile\n"
+        "🏆 *Leaderboard* — Top 10 referrers\n"
+        "⭐ *Top Sellers* — Top sellers by rating\n"
+        "👑 *Trust Ranking* — Trust vote ranking\n"
+        "✅ *Get Verified* — Request verified seller\n"
+        "🤝 *My Deals* — Your active deals\n"
+        "🏅 *Badges* — Badge milestones\n\n"
+        "Other commands:\n"
+        "`/review @seller <1-5> <comment>` — Review a seller\n"
+        "`/profile @user` — View another user's profile\n"
+        "`/deal @buyer @seller <amount>` — Initiate a deal\n"
+        "`/dealcomplete <id>` — Confirm deal done\n"
+        "`/canceldeal <id>` — Cancel a deal\n"
+        "`/delist <id>` — Remove your listing\n"
+        "`/verified` — List all verified sellers\n"
     )
     if is_adm:
-        text += (
-            "\n👑 *Admin Commands:*\n"
-            "/ban @user — Ban a user\n"
-            "/mute @user <minutes> — Mute a user\n"
-            "/warn @user — Issue a warning\n"
-            "/warnings @user — Check warning count\n"
-            "/stats — Group statistics\n"
-            "/addword <word> — Add scam filter word\n"
-            "/removeword <word> — Remove scam filter word\n"
-            "/announce <msg> — DM all members\n"
-            "/approve @user — Approve verified seller\n"
-            "/reject @user <reason> — Reject verification\n"
-            "/sellercard @user — Post seller card\n"
-            "/setbadge <count> <name> [admin] — Set badge milestone\n"
-            "/editbadge <count> <name> — Edit badge name\n"
-            "/removebadge <count> — Remove badge milestone\n"
-        )
-    await update.message.reply_text(text, parse_mode="Markdown")
+        text += "\n⚙️ *Admin:* Tap the *Admin Panel* button or use `/ban`, `/mute`, `/warn`, `/stats`, `/announce`, `/approve`, etc."
+    await update.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard(is_adm),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1954,7 +2069,10 @@ def main():
 
     # ── Sell ConversationHandler ──────────────────────────────────────────
     sell_conv = ConversationHandler(
-        entry_points=[CommandHandler("sell", sell_start)],
+        entry_points=[
+            CommandHandler("sell", sell_start),
+            MessageHandler(filters.Regex(r"^🛒 Sell$") & filters.ChatType.PRIVATE, sell_start),
+        ],
         states={
             SELL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_name)],
             SELL_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_price)],
@@ -1972,7 +2090,10 @@ def main():
 
     # ── Buy ConversationHandler ───────────────────────────────────────────
     buy_conv = ConversationHandler(
-        entry_points=[CommandHandler("buy", buy_start)],
+        entry_points=[
+            CommandHandler("buy", buy_start),
+            MessageHandler(filters.Regex(r"^🛍️ Buy$") & filters.ChatType.PRIVATE, buy_start),
+        ],
         states={
             BUY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_name)],
             BUY_BUDGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_budget)],
@@ -1987,6 +2108,20 @@ def main():
         allow_reentry=True,
     )
 
+    # ── Search ConversationHandler ────────────────────────────────────────
+    search_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex(r"^🔍 Search$") & filters.ChatType.PRIVATE, search_button_start),
+        ],
+        states={
+            SEARCH_QUERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_query_handler)],
+        },
+        fallbacks=[CommandHandler("cancel", search_conv_cancel)],
+        per_user=True,
+        per_chat=False,
+        allow_reentry=True,
+    )
+
     # ── Register handlers ─────────────────────────────────────────────────
 
     # Chat member updates (captcha)
@@ -1995,6 +2130,7 @@ def main():
     # Conversations
     application.add_handler(sell_conv)
     application.add_handler(buy_conv)
+    application.add_handler(search_conv)
 
     # Callback queries
     application.add_handler(CallbackQueryHandler(captcha_callback, pattern=r"^captcha_"))
@@ -2002,6 +2138,30 @@ def main():
     application.add_handler(CallbackQueryHandler(deal_callback, pattern=r"^deal_(accept|decline)_"))
     application.add_handler(CallbackQueryHandler(trust_callback, pattern=r"^trust_"))
     application.add_handler(CallbackQueryHandler(profile_callback, pattern=r"^profile_"))
+    application.add_handler(CallbackQueryHandler(admin_panel_callback, pattern=r"^adm_"))
+
+    # Keyboard button handler (private chat only — buttons not handled by conversations above)
+    BUTTON_HANDLERS = {
+        r"^🔗 My Referral Link$": mylink,
+        r"^📊 My Stats$": mystats,
+        r"^👤 My Profile$": profile_cmd,
+        r"^🏆 Leaderboard$": leaderboard,
+        r"^⭐ Top Sellers$": topsellers_cmd,
+        r"^👑 Trust Ranking$": ranking_cmd,
+        r"^✅ Get Verified$": verify_cmd,
+        r"^🤝 My Deals$": mydeals_cmd,
+        r"^🏅 Badges$": badges,
+        r"^❓ Help$": help_cmd,
+        r"^📋 My Listings$": mylistings,
+        r"^⚙️ Admin Panel$": admin_panel_cmd,
+    }
+    for pattern, handler_func in BUTTON_HANDLERS.items():
+        application.add_handler(
+            MessageHandler(
+                filters.Regex(pattern) & filters.ChatType.PRIVATE,
+                handler_func,
+            )
+        )
 
     # User commands
     application.add_handler(CommandHandler("start", start))
@@ -2039,6 +2199,7 @@ def main():
     application.add_handler(CommandHandler("setbadge", setbadge))
     application.add_handler(CommandHandler("editbadge", editbadge))
     application.add_handler(CommandHandler("removebadge", removebadge))
+    application.add_handler(CommandHandler("adminpanel", admin_panel_cmd))
 
     # Group message filters (order matters — run all via separate handlers)
     application.add_handler(
