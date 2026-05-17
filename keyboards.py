@@ -6,10 +6,6 @@ SUCCESS = "success"
 DANGER  = "danger"
 
 
-def _stagger(i: int) -> str:
-    return (SUCCESS, PRIMARY, DANGER)[i % 3]
-
-
 def _btn(
     text: str,
     *,

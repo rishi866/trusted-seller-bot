@@ -86,6 +86,7 @@ from db import (
     record_deal_confirmation,
     record_cancel_request,
     get_member_by_username,
+    save_custom_emoji,
 )
 from keyboards import (
     main_menu,
@@ -162,16 +163,6 @@ async def resolve_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE
     return None, None
 
 
-async def get_member_by_username(username: str):
-    from db import get_supabase
-    def _get():
-        res = get_supabase().table("members").select("*").ilike("username", username).execute()
-        return res.data[0] if res.data else None
-    try:
-        return await asyncio.to_thread(_get)
-    except Exception:
-        return None
-
 
 async def edit_or_reply(update: Update, text: str, **kwargs):
     """Edit message if from callback, otherwise reply."""
@@ -240,12 +231,12 @@ async def check_and_update_badge(user_id, old_count, new_count, bot, chat_id, us
         try:
             await bot.send_message(
                 chat_id=chat_id,
-                text=(
-                    f"🎉 Congratulations @{username}!\n"
-                    f"You earned the *{earned['badge_name']}* badge! 🏆\n"
+                text=decorate(
+                    f"🎉 Congratulations @{h(username)}!\n"
+                    f"You earned the <b>{h(earned['badge_name'])}</b> badge! 🏆\n"
                     f"Total Referrals: {new_count}"
                 ),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
         except TelegramError:
             pass
@@ -475,7 +466,7 @@ async def scam_word_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     scam_words = context.bot_data.get("scam_words_cache", [])
     text_lower = msg.text.lower()
     for word in scam_words:
-        if word.lower() in text_lower:
+        if re.search(rf"\b{re.escape(word.lower())}\b", text_lower):
             try:
                 await msg.delete()
             except TelegramError:
@@ -553,7 +544,6 @@ _PACK_LINK_RE = re.compile(
 
 async def _fetch_from_pack(bot, pack_name: str) -> tuple[int, list[str]]:
     """Fetch all custom emoji from a Telegram emoji pack by set name."""
-    from db import save_custom_emoji
     try:
         sticker_set = await bot.get_sticker_set(pack_name)
     except TelegramError as e:
@@ -621,7 +611,6 @@ async def emoji_capture_handler(update: Update, context: ContextTypes.DEFAULT_TY
         raise ApplicationHandlerStop  # don't let ConversationHandlers see this
 
     # ── Case 2: admin typed / forwarded message with custom emoji ─────────────
-    from db import save_custom_emoji
     entities    = list(msg.entities or []) + list(msg.caption_entities or [])
     custom_ents = [e for e in entities if e.type == "custom_emoji"]
 
@@ -710,8 +699,8 @@ async def mylink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = f"https://t.me/{bot_username}?start=ref_{user.id}"
     await edit_or_reply(
         update,
-        f"🔗 *Your Referral Link*\n\n`{link}`\n\nShare it and earn badges! 🏆",
-        parse_mode="Markdown",
+        decorate(f"🔗 <b>Your Referral Link</b>\n\n<code>{link}</code>\n\nShare it and earn badges! 🏆"),
+        parse_mode="HTML",
         reply_markup=back_home(),
     )
 
@@ -726,15 +715,17 @@ async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     next_text = ""
     if next_b:
         needed = next_b["required_count"] - count
-        next_text = f"\n📈 Next: *{next_b['badge_name']}* — {needed} more referrals"
+        next_text = f"\n📈 Next: <b>{h(next_b['badge_name'])}</b> — {needed} more referrals"
 
     await edit_or_reply(
         update,
-        f"📊 *Your Stats*\n\n"
-        f"👥 Total Referrals: *{count}*\n"
-        f"🏆 Current Badge: *{badge}*"
-        f"{next_text}",
-        parse_mode="Markdown",
+        decorate(
+            f"📊 <b>Your Stats</b>\n\n"
+            f"👥 Total Referrals: <b>{count}</b>\n"
+            f"🏆 Current Badge: <b>{h(badge)}</b>"
+            f"{next_text}"
+        ),
+        parse_mode="HTML",
         reply_markup=back_home(),
     )
 
@@ -756,7 +747,7 @@ async def setbadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ Please provide a badge name.")
     ok = await set_badge_config(count, badge_name, is_admin_level)
     if ok:
-        await update.message.reply_text(f"✅ Badge set: *{count}* → *{badge_name}*", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Badge set: <b>{count}</b> → <b>{h(badge_name)}</b>", parse_mode="HTML")
     else:
         await update.message.reply_text("❌ Error saving badge.")
 
@@ -774,7 +765,7 @@ async def editbadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_name = " ".join(args[1:])
     ok = await set_badge_config(count, new_name)
     if ok:
-        await update.message.reply_text(f"✅ Badge updated: *{count}* → *{new_name}*", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Badge updated: <b>{count}</b> → <b>{h(new_name)}</b>", parse_mode="HTML")
     else:
         await update.message.reply_text("❌ Error updating badge.")
 
@@ -790,7 +781,7 @@ async def removebadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ Count must be a number.")
     ok = await remove_badge_config(count)
     if ok:
-        await update.message.reply_text(f"✅ Badge removed for count *{count}*.", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Badge removed for count <b>{count}</b>.", parse_mode="HTML")
     else:
         await update.message.reply_text("❌ Error removing badge.")
 
@@ -801,24 +792,24 @@ async def badges(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await edit_or_reply(
             update, "🏆 No badge milestones configured yet.", reply_markup=back_home()
         )
-    lines = ["🏆 *Badge Milestones:*\n"]
+    lines = ["🏆 <b>Badge Milestones:</b>\n"]
     for b in all_badges:
         admin_tag = " 👑" if b.get("is_admin_level") else ""
-        lines.append(f"• *{b['required_count']}* referrals → {b['badge_name']}{admin_tag}")
-    await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
+        lines.append(f"• <b>{b['required_count']}</b> referrals → {h(b['badge_name'])}{admin_tag}")
+    await edit_or_reply(update, decorate("\n".join(lines)), parse_mode="HTML", reply_markup=back_home())
 
 
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top = await get_top_referrers(10)
     if not top:
         return await edit_or_reply(update, "📊 No referral data yet.", reply_markup=back_home())
-    lines = ["🏆 *Top Referrers:*\n"]
+    lines = ["🏆 <b>Top Referrers:</b>\n"]
     for i, m in enumerate(top, 1):
         uname = f"@{m['username']}" if m.get("username") else m.get("full_name", "?")
         badge = m.get("badge") or ""
         count = m.get("referral_count", 0)
-        lines.append(f"{i}. {uname} — {count} referrals {badge}")
-    await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
+        lines.append(f"{i}. {h(uname)} — {count} referrals {h(badge)}")
+    await edit_or_reply(update, decorate("\n".join(lines)), parse_mode="HTML", reply_markup=back_home())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -837,13 +828,13 @@ async def sell_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.message.reply_text(
-            "🛒 *Create a Sell Listing!*\n\nWhat is the tool name? (e.g. ChatGPT Plus, Canva Pro)",
-            parse_mode="Markdown",
+            decorate("🛒 <b>Create a Sell Listing!</b>\n\nWhat is the tool name? (e.g. ChatGPT Plus, Canva Pro)"),
+            parse_mode="HTML",
         )
     else:
         await update.message.reply_text(
-            "🛒 *Create a Sell Listing!*\n\nWhat is the tool name? (e.g. ChatGPT Plus, Canva Pro)",
-            parse_mode="Markdown",
+            decorate("🛒 <b>Create a Sell Listing!</b>\n\nWhat is the tool name? (e.g. ChatGPT Plus, Canva Pro)"),
+            parse_mode="HTML",
         )
     return SELL_NAME
 
@@ -958,13 +949,13 @@ async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.message.reply_text(
-            "🛍️ *Create a Buy Request!*\n\nWhich tool are you looking for? (e.g. Adobe CC, Midjourney)",
-            parse_mode="Markdown",
+            decorate("🛍️ <b>Create a Buy Request!</b>\n\nWhich tool are you looking for? (e.g. Adobe CC, Midjourney)"),
+            parse_mode="HTML",
         )
     else:
         await update.message.reply_text(
-            "🛍️ *Create a Buy Request!*\n\nWhich tool are you looking for? (e.g. Adobe CC, Midjourney)",
-            parse_mode="Markdown",
+            decorate("🛍️ <b>Create a Buy Request!</b>\n\nWhich tool are you looking for? (e.g. Adobe CC, Midjourney)"),
+            parse_mode="HTML",
         )
     return BUY_NAME
 
@@ -1051,8 +1042,8 @@ async def search_start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry from 🔍 Search inline button."""
     await update.callback_query.answer()
     await update.callback_query.message.reply_text(
-        "🔍 *Search Listings*\n\nType a keyword (e.g. ChatGPT, Canva, Adobe):",
-        parse_mode="Markdown",
+        decorate("🔍 <b>Search Listings</b>\n\nType a keyword (e.g. ChatGPT, Canva, Adobe):"),
+        parse_mode="HTML",
     )
     return SEARCH_QUERY
 
@@ -1062,8 +1053,8 @@ async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     results = await search_listings(keyword)
     if not results:
         await update.message.reply_text(
-            f"🔍 No listings found for *'{keyword}'*.",
-            parse_mode="Markdown",
+            f"🔍 No listings found for <b>'{h(keyword)}'</b>.",
+            parse_mode="HTML",
             reply_markup=back_home(),
         )
         return ConversationHandler.END
@@ -1242,11 +1233,13 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = await get_group_stats()
     await edit_or_reply(
         update,
-        f"📊 *Group Stats*\n\n"
-        f"👥 Total Members: {stats['total_members']}\n"
-        f"📦 Listings Today: {stats['listings_today']}\n"
-        f"🆕 New Joins Today: {stats['new_joins_today']}",
-        parse_mode="Markdown",
+        decorate(
+            f"📊 <b>Group Stats</b>\n\n"
+            f"👥 Total Members: {stats['total_members']}\n"
+            f"📦 Listings Today: {stats['listings_today']}\n"
+            f"🆕 New Joins Today: {stats['new_joins_today']}"
+        ),
+        parse_mode="HTML",
         reply_markup=admin_panel_kb(),
     )
 
@@ -1319,8 +1312,8 @@ async def admin_panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update.effective_user.id, context):
         return await update.message.reply_text("❌ Admins only.")
     await update.message.reply_text(
-        "⚙️ *Admin Panel*",
-        parse_mode="Markdown",
+        decorate("⚙️ <b>Admin Panel</b>"),
+        parse_mode="HTML",
         reply_markup=admin_panel_kb(),
     )
 
@@ -1332,6 +1325,14 @@ async def admin_panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def daily_morning_post(context: ContextTypes.DEFAULT_TYPE):
     await expire_old_listings()
     await cancel_expired_deals()
+    # Prune unbounded bot_data dicts to prevent memory growth
+    now = datetime.now(timezone.utc).timestamp()
+    for key, ttl in (("deal_rl", 120), ("flood_tracker", 60)):
+        store = context.bot_data.get(key, {})
+        stale = [k for k, v in store.items() if now - (v if isinstance(v, (int, float)) else 0) > ttl]
+        for k in stale:
+            store.pop(k, None)
+    context.bot_data.pop("deal_acceptances", None)  # rebuild from DB on next accept
     sell_count, buy_count = await get_active_listing_counts()
     try:
         await context.bot.send_message(
@@ -1434,8 +1435,8 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=target_user_id,
-                    text="🎉 Congratulations! You are now a *Verified Seller*! ✅",
-                    parse_mode="Markdown",
+                    text=decorate("🎉 Congratulations! You are now a <b>Verified Seller</b>! ✅"),
+                    parse_mode="HTML",
                 )
                 await context.bot.send_message(
                     chat_id=GROUP_ID,
@@ -1461,14 +1462,14 @@ async def verified_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sellers = await get_verified_sellers()
     if not sellers:
         return await edit_or_reply(update, "✅ No verified sellers yet.", reply_markup=back_home())
-    lines = ["✅ *Verified Sellers:*\n"]
+    lines = ["✅ <b>Verified Sellers:</b>\n"]
     for s in sellers:
         uname  = f"@{s['username']}" if s.get("username") else s.get("full_name", "?")
         badge  = s.get("badge") or ""
         rating = s.get("avg_rating", 0)
         deals  = s.get("total_deals", 0)
-        lines.append(f"• {uname} {badge} | ⭐ {rating}/5 | 📦 {deals} deals")
-    await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
+        lines.append(f"• {h(uname)} {h(badge)} | ⭐ {rating}/5 | 📦 {deals} deals")
+    await edit_or_reply(update, decorate("\n".join(lines)), parse_mode="HTML", reply_markup=back_home())
 
 
 async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1482,8 +1483,8 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=target_id,
-                text="🎉 You are now a *Verified Seller*! ✅",
-                parse_mode="Markdown",
+                text=decorate("🎉 You are now a <b>Verified Seller</b>! ✅"),
+                parse_mode="HTML",
             )
             await context.bot.send_message(chat_id=GROUP_ID, text=decorate(f"🎊 <b>{h(target_name)}</b> is now a Verified Seller! ✅"), parse_mode="HTML")
         except TelegramError:
@@ -1491,6 +1492,29 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ {target_name} verified!")
     else:
         await update.message.reply_text("❌ Verification failed.")
+
+
+async def unverify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update.effective_user.id, context):
+        return await update.message.reply_text("❌ Admins only.")
+    target_id, target_name = await resolve_target_user(update, context)
+    if not target_id:
+        return await update.message.reply_text("Usage: /unverify @username or reply to a message")
+    member = await get_member(target_id)
+    if not member:
+        return await update.message.reply_text("❌ User not found.")
+    if not member.get("is_verified"):
+        return await update.message.reply_text(f"⚠️ {target_name} is not verified.")
+    await update_member(target_id, is_verified=False)
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=decorate("⚠️ <b>Your verified status has been removed by an admin.</b>"),
+            parse_mode="HTML",
+        )
+    except TelegramError:
+        pass
+    await update.message.reply_text(f"✅ {target_name} unverified.")
 
 
 async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1697,15 +1721,15 @@ async def topsellers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sellers = await get_top_sellers_by_rating(10)
     if not sellers:
         return await edit_or_reply(update, "⭐ No review data yet.", reply_markup=back_home())
-    lines = ["⭐ *Top Sellers by Rating:*\n"]
+    lines = ["⭐ <b>Top Sellers by Rating:</b>\n"]
     for i, s in enumerate(sellers, 1):
         uname    = f"@{s['username']}" if s.get("username") else s.get("full_name", "?")
         verified = "✅" if s.get("is_verified") else ""
         badge    = s.get("badge") or ""
         rating   = s.get("avg_rating", 0)
         deals    = s.get("total_deals", 0)
-        lines.append(f"{i}. {uname} {verified} {badge} | ⭐ {rating}/5 | 📦 {deals} deals")
-    await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
+        lines.append(f"{i}. {h(uname)} {verified} {h(badge)} | ⭐ {rating}/5 | 📦 {deals} deals")
+    await edit_or_reply(update, decorate("\n".join(lines)), parse_mode="HTML", reply_markup=back_home())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1838,14 +1862,14 @@ async def deal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=GROUP_ID,
-                text=(
-                    f"🤝 *Deal is Now Active!*\n\n"
+                text=decorate(
+                    f"🤝 <b>Deal is Now Active!</b>\n\n"
                     f"🆔 Deal ID: #{deal_id}\n"
-                    f"🛒 Tool: {deal['tool_name']}\n"
+                    f"🛒 Tool: {h(deal['tool_name'])}\n"
                     f"💰 Amount: {deal['amount']}\n\n"
                     "Both parties agreed. Good luck! 🚀"
                 ),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
         except TelegramError:
             pass
@@ -2226,14 +2250,14 @@ async def ranking_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top = await get_top_by_trust(10)
     if not top:
         return await edit_or_reply(update, "👍 No trust vote data yet.", reply_markup=back_home())
-    lines = ["👑 *Trust Ranking:*\n"]
+    lines = ["👑 <b>Trust Ranking:</b>\n"]
     for i, m in enumerate(top, 1):
         uname    = f"@{m['username']}" if m.get("username") else m.get("full_name", "?")
         badge    = m.get("badge") or ""
         verified = "✅" if m.get("is_verified") else ""
         trust    = m.get("trust_count", 0)
-        lines.append(f"{i}. {uname} {verified} {badge} — 👍 {trust}")
-    await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
+        lines.append(f"{i}. {h(uname)} {verified} {h(badge)} — 👍 {trust}")
+    await edit_or_reply(update, decorate("\n".join(lines)), parse_mode="HTML", reply_markup=back_home())
 
 
 async def _send_or_dm(context, query, user_id: int, text: str, **kwargs):
@@ -2407,8 +2431,8 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             await edit_or_reply(
                 update,
-                f"👋 *Welcome back, {query.from_user.first_name}!*\n\nChoose an option 👇",
-                parse_mode="Markdown",
+                decorate(f"👋 <b>Welcome back, {h(query.from_user.first_name)}!</b>\n\nChoose an option 👇"),
+                parse_mode="HTML",
                 reply_markup=main_menu(is_adm),
             )
 
@@ -2458,8 +2482,8 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             await edit_or_reply(
                 update,
-                "⚙️ *Admin Panel*\n\nSelect an action:",
-                parse_mode="Markdown",
+                decorate("⚙️ <b>Admin Panel</b>\n\nSelect an action:"),
+                parse_mode="HTML",
                 reply_markup=admin_panel_kb(),
             )
 
@@ -2472,11 +2496,13 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stats = await get_group_stats()
             await edit_or_reply(
                 update,
-                f"📊 *Group Stats*\n\n"
-                f"👥 Total Members: {stats['total_members']}\n"
-                f"📦 Listings Today: {stats['listings_today']}\n"
-                f"🆕 New Joins Today: {stats['new_joins_today']}",
-                parse_mode="Markdown",
+                decorate(
+                    f"📊 <b>Group Stats</b>\n\n"
+                    f"👥 Total Members: {stats['total_members']}\n"
+                    f"📦 Listings Today: {stats['listings_today']}\n"
+                    f"🆕 New Joins Today: {stats['new_joins_today']}"
+                ),
+                parse_mode="HTML",
                 reply_markup=admin_panel_kb(),
             )
 
@@ -2488,39 +2514,48 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             word_list = ", ".join(words) if words else "None added yet"
             await edit_or_reply(
                 update,
-                f"🚫 *Scam Filter Words:*\n`{word_list}`\n\nAdd: `/addword <word>`\nRemove: `/removeword <word>`",
-                parse_mode="Markdown",
+                decorate(
+                    f"🚫 <b>Scam Filter Words:</b>\n<code>{h(word_list)}</code>\n\n"
+                    "Add: <code>/addword &lt;word&gt;</code>\nRemove: <code>/removeword &lt;word&gt;</code>"
+                ),
+                parse_mode="HTML",
                 reply_markup=admin_panel_kb(),
             )
 
         elif data == "adm:ban_info":
-            await edit_or_reply(update, "🔨 *Ban*\nUsage: `/ban @username` or reply to message.",
-                                parse_mode="Markdown", reply_markup=admin_panel_kb())
+            await edit_or_reply(update,
+                                "🔨 <b>Ban</b>\nUsage: <code>/ban @username</code> or reply to message.",
+                                parse_mode="HTML", reply_markup=admin_panel_kb())
 
         elif data == "adm:mute_info":
-            await edit_or_reply(update, "🔇 *Mute*\nUsage: `/mute @username <minutes>`\nDefault: 10 minutes.",
-                                parse_mode="Markdown", reply_markup=admin_panel_kb())
+            await edit_or_reply(update,
+                                "🔇 <b>Mute</b>\nUsage: <code>/mute @username &lt;minutes&gt;</code>\nDefault: 10 minutes.",
+                                parse_mode="HTML", reply_markup=admin_panel_kb())
 
         elif data == "adm:warn_info":
-            await edit_or_reply(update, "⚠️ *Warn*\nUsage: `/warn @username`\nAuto-bans at warning limit.",
-                                parse_mode="Markdown", reply_markup=admin_panel_kb())
+            await edit_or_reply(update,
+                                "⚠️ <b>Warn</b>\nUsage: <code>/warn @username</code>\nAuto-bans at warning limit.",
+                                parse_mode="HTML", reply_markup=admin_panel_kb())
 
         elif data == "adm:approve_info":
-            await edit_or_reply(update, "✅ *Approve Seller*\nUsage: `/approve @username`",
-                                parse_mode="Markdown", reply_markup=admin_panel_kb())
+            await edit_or_reply(update,
+                                "✅ <b>Approve Seller</b>\nUsage: <code>/approve @username</code>",
+                                parse_mode="HTML", reply_markup=admin_panel_kb())
 
         elif data == "adm:announce_info":
-            await edit_or_reply(update, "📢 *Announce*\nUsage: `/announce <message>`\nDMs all members.",
-                                parse_mode="Markdown", reply_markup=admin_panel_kb())
+            await edit_or_reply(update,
+                                "📢 <b>Announce</b>\nUsage: <code>/announce &lt;message&gt;</code>\nDMs all members.",
+                                parse_mode="HTML", reply_markup=admin_panel_kb())
 
         elif data == "adm:badge_info":
             await edit_or_reply(update,
-                                "🏅 *Set Badge*\nUsage: `/setbadge <count> <name>`\nExample: `/setbadge 5 Star Seller`",
-                                parse_mode="Markdown", reply_markup=admin_panel_kb())
+                                "🏅 <b>Set Badge</b>\nUsage: <code>/setbadge &lt;count&gt; &lt;name&gt;</code>\nExample: <code>/setbadge 5 Star Seller</code>",
+                                parse_mode="HTML", reply_markup=admin_panel_kb())
 
         elif data == "adm:sellercard_info":
-            await edit_or_reply(update, "🃏 *Seller Card*\nUsage: `/sellercard @username`",
-                                parse_mode="Markdown", reply_markup=admin_panel_kb())
+            await edit_or_reply(update,
+                                "🃏 <b>Seller Card</b>\nUsage: <code>/sellercard @username</code>",
+                                parse_mode="HTML", reply_markup=admin_panel_kb())
 
         elif data == "adm:emoji":
             if not await is_admin(query.from_user.id, context):
@@ -2579,6 +2614,8 @@ def main():
     application = ApplicationBuilder().token(BOT_TOKEN).post_init(_post_init).build()
 
     # ── Sell ConversationHandler ──────────────────────────────────────────
+    _CONV_TIMEOUT = 30 * 60  # 30 minutes
+
     sell_conv = ConversationHandler(
         entry_points=[
             CommandHandler("sell", sell_start),
@@ -2592,11 +2629,15 @@ def main():
                 MessageHandler(filters.PHOTO | filters.Document.IMAGE, sell_photo),
                 CommandHandler("skip", sell_skip_photo),
             ],
+            ConversationHandler.TIMEOUT: [
+                MessageHandler(filters.ALL, sell_cancel),
+            ],
         },
         fallbacks=[CommandHandler("cancel", sell_cancel)],
         per_user=True,
         per_chat=False,
         allow_reentry=True,
+        conversation_timeout=_CONV_TIMEOUT,
     )
 
     # ── Buy ConversationHandler ───────────────────────────────────────────
@@ -2612,11 +2653,15 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, buy_req),
                 CommandHandler("skip", buy_skip_req),
             ],
+            ConversationHandler.TIMEOUT: [
+                MessageHandler(filters.ALL, buy_cancel),
+            ],
         },
         fallbacks=[CommandHandler("cancel", buy_cancel)],
         per_user=True,
         per_chat=False,
         allow_reentry=True,
+        conversation_timeout=_CONV_TIMEOUT,
     )
 
     # ── Search ConversationHandler (from inline button) ───────────────────
@@ -2626,11 +2671,15 @@ def main():
         ],
         states={
             SEARCH_QUERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_query_handler)],
+            ConversationHandler.TIMEOUT: [
+                MessageHandler(filters.ALL, search_cancel),
+            ],
         },
         fallbacks=[CommandHandler("cancel", search_cancel)],
         per_user=True,
         per_chat=False,
         allow_reentry=True,
+        conversation_timeout=_CONV_TIMEOUT,
     )
 
     # ── Register handlers ─────────────────────────────────────────────────
@@ -2693,6 +2742,15 @@ def main():
     application.add_handler(CommandHandler("setbadge",    setbadge))
     application.add_handler(CommandHandler("editbadge",   editbadge))
     application.add_handler(CommandHandler("removebadge", removebadge))
+    application.add_handler(CommandHandler("unverify",    unverify_cmd))
+
+    # Global /cancel — fires only when NOT inside a ConversationHandler (group=1)
+    async def _global_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text(
+            "ℹ️ No active conversation to cancel.",
+            reply_markup=back_home(),
+        )
+    application.add_handler(CommandHandler("cancel", _global_cancel), group=1)
 
     # Emoji capture — group=-1 so it fires before ConversationHandlers (group=0)
     application.add_handler(MessageHandler(
