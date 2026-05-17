@@ -98,6 +98,17 @@ def trust_profile_kb(seller_id: int) -> InlineKeyboardMarkup:
     ])
 
 
+def seller_card_kb(seller_id: int) -> InlineKeyboardMarkup:
+    """Full action keyboard shown on a seller profile card."""
+    return InlineKeyboardMarkup([
+        [
+            _btn("👍 Trust Vote",  callback_data=f"trust_{seller_id}",   style=SUCCESS),
+            _btn("🤝 Start Deal",  callback_data=f"deal_init_{seller_id}", style=PRIMARY),
+        ],
+        [_btn("🏠 Main Menu", callback_data="menu:home", style=PRIMARY)],
+    ])
+
+
 # ── Verification ──────────────────────────────────────────────────────────────
 
 def verify_admin_kb(user_id: int) -> InlineKeyboardMarkup:

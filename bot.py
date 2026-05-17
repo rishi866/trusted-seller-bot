@@ -94,6 +94,9 @@ from keyboards import (
     deal_propose_kb,
     deal_actions_kb,
     admin_panel_kb,
+    seller_card_kb,
+    _btn,
+    PRIMARY, SUCCESS, DANGER,
 )
 import emoji_fx
 from emoji_fx import decorate, h, entities_to_html
@@ -295,7 +298,6 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
     ]
     random.shuffle(options)
 
-    from keyboards import _btn, PRIMARY, SUCCESS, DANGER
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton(text=opt[0], callback_data=opt[1])
@@ -1065,12 +1067,23 @@ async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return ConversationHandler.END
 
-    lines = [f"🔍 *Search Results for '{keyword}':*\n"]
-    for r in results[:10]:
+    rows = []
+    lines = [f"🔍 <b>Search Results for '{h(keyword)}':</b>\n"]
+    for i, r in enumerate(results[:10]):
         t     = "🔥 SELL" if r["type"] == "sell" else "🛍️ BUY"
         uname = f"@{r['username']}" if r.get("username") else r.get("full_name", "?")
-        lines.append(f"• {t} | {r['tool_name']} | ₹{r.get('price', '?')} | {uname} | #ID{r['id']}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
+        lines.append(f"{i+1}. {t} | <b>{h(r['tool_name'])}</b> | ₹{h(r.get('price','?'))} | {h(uname)}")
+        rows.append([_btn(
+            f"👤 {uname} — {r['tool_name'][:22]}",
+            callback_data=f"profile_{r['user_id']}",
+            style=PRIMARY,
+        )])
+    rows.append([_btn("🏠 Main Menu", callback_data="menu:home", style=PRIMARY)])
+    await update.message.reply_text(
+        decorate("\n".join(lines)),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
     return ConversationHandler.END
 
 
@@ -1088,12 +1101,23 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     results = await search_listings(keyword)
     if not results:
         return await update.message.reply_text(f"🔍 No listings found for '{keyword}'.")
-    lines = [f"🔍 *Search Results for '{keyword}':*\n"]
-    for r in results[:10]:
+    rows = []
+    lines = [f"🔍 <b>Search Results for '{h(keyword)}':</b>\n"]
+    for i, r in enumerate(results[:10]):
         t     = "🔥 SELL" if r["type"] == "sell" else "🛍️ BUY"
         uname = f"@{r['username']}" if r.get("username") else r.get("full_name", "?")
-        lines.append(f"• {t} | {r['tool_name']} | ₹{r.get('price', '?')} | {uname} | #ID{r['id']}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
+        lines.append(f"{i+1}. {t} | <b>{h(r['tool_name'])}</b> | ₹{h(r.get('price','?'))} | {h(uname)}")
+        rows.append([_btn(
+            f"👤 {uname} — {r['tool_name'][:22]}",
+            callback_data=f"profile_{r['user_id']}",
+            style=PRIMARY,
+        )])
+    rows.append([_btn("🏠 Main Menu", callback_data="menu:home", style=PRIMARY)])
+    await update.message.reply_text(
+        decorate("\n".join(lines)),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
 
 
 async def mylistings(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1557,22 +1581,23 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_profile_card(update, member)
 
 
-async def _send_profile_card(update: Update, member: dict):
-    avg, count   = await get_seller_avg_rating(member["user_id"])
-    reviews      = await get_seller_reviews(member["user_id"], 3)
-    uname        = f"@{member['username']}" if member.get("username") else member.get("full_name", "?")
-    verified     = "✅ Yes" if member.get("is_verified") else "❌ No"
-    badge        = member.get("badge") or "—"
-    trust        = member.get("trust_count", 0)
-    total_deals  = member.get("total_deals", 0)
-    warnings     = member.get("warnings", 0)
-    stars        = "⭐" * round(avg) if avg else "No rating"
+async def _build_seller_card_text(member: dict) -> str:
+    """Build the full HTML seller card text used in profile views."""
+    avg, count  = await get_seller_avg_rating(member["user_id"])
+    reviews     = await get_seller_reviews(member["user_id"], 3)
+    uname       = f"@{member['username']}" if member.get("username") else member.get("full_name", "?")
+    verified    = "✅ Yes" if member.get("is_verified") else "❌ No"
+    badge       = member.get("badge") or "—"
+    trust       = member.get("trust_count", 0)
+    total_deals = member.get("total_deals", 0)
+    warnings    = member.get("warnings", 0)
+    stars       = "⭐" * round(avg) if avg else "—"
 
-    text = (
-        f"👤 *Profile: {uname}*\n"
+    text = decorate(
+        f"👤 <b>Seller Profile: {h(uname)}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"✅ Verified: {verified}\n"
-        f"🏆 Badge: {badge}\n"
+        f"🏆 Badge: {h(badge)}\n"
         f"⭐ Rating: {avg}/5 ({count} reviews) {stars}\n"
         f"📦 Total Deals: {total_deals}\n"
         f"👍 Trust Votes: {trust}\n"
@@ -1580,12 +1605,20 @@ async def _send_profile_card(update: Update, member: dict):
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
     )
     if reviews:
-        text += "📋 *Recent Reviews:*\n"
+        text += "📋 <b>Recent Reviews:</b>\n"
         for r in reviews:
             s = "⭐" * r["rating"]
-            text += f"{s} — {r.get('comment', '')[:80]}\n"
+            text += f"{s} — {h(r.get('comment', '')[:80])}\n"
+    return text
 
-    await edit_or_reply(update, text, parse_mode="Markdown", reply_markup=back_home())
+
+async def _send_profile_card(update: Update, member: dict):
+    text = await _build_seller_card_text(member)
+    await edit_or_reply(
+        update, text,
+        parse_mode="HTML",
+        reply_markup=seller_card_kb(member["user_id"]),
+    )
 
 
 async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1596,31 +1629,12 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not member:
         await query.answer("Profile not found!", show_alert=True)
         return
-
-    avg, count  = await get_seller_avg_rating(seller_id)
-    reviews     = await get_seller_reviews(seller_id, 3)
-    uname       = f"@{member['username']}" if member.get("username") else member.get("full_name", "?")
-    verified    = "✅ Yes" if member.get("is_verified") else "❌ No"
-    badge       = member.get("badge") or "—"
-    trust       = member.get("trust_count", 0)
-    total_deals = member.get("total_deals", 0)
-
-    text = (
-        f"👤 *Profile: {uname}*\n"
-        f"✅ Verified: {verified}\n"
-        f"🏆 Badge: {badge}\n"
-        f"⭐ Rating: {avg}/5 ({count} reviews)\n"
-        f"📦 Total Deals: {total_deals}\n"
-        f"👍 Trust Votes: {trust}\n"
-    )
-    if reviews:
-        text += "\n📋 *Recent Reviews:*\n"
-        for r in reviews:
-            s = "⭐" * r["rating"]
-            text += f"{s} {r.get('comment', '')[:60]}\n"
-
+    text = await _build_seller_card_text(member)
     try:
-        await query.message.reply_text(text, parse_mode="Markdown", reply_markup=back_home())
+        await query.message.reply_text(
+            text, parse_mode="HTML",
+            reply_markup=seller_card_kb(seller_id),
+        )
     except TelegramError:
         pass
 
@@ -2090,6 +2104,27 @@ async def ranking_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await edit_or_reply(update, "\n".join(lines), parse_mode="Markdown", reply_markup=back_home())
 
 
+async def deal_init_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tapped '🤝 Start Deal' on a seller profile — show how to initiate."""
+    query     = update.callback_query
+    await query.answer()
+    seller_id = int(query.data.split("_")[2])
+    member    = await get_member(seller_id)
+    uname     = f"@{member['username']}" if member and member.get("username") else f"user#{seller_id}"
+    await query.message.reply_text(
+        decorate(
+            f"🤝 <b>Start a Deal with {h(uname)}</b>\n\n"
+            "Use the command below — replace the values:\n\n"
+            f"<code>/deal @yourUsername {h(uname.lstrip('@'))} amount ToolName</code>\n\n"
+            "Example:\n"
+            f"<code>/deal @alice {h(uname.lstrip('@'))} 500 ChatGPT Plus</code>\n\n"
+            "💡 Both parties will receive a deal proposal to accept."
+        ),
+        parse_mode="HTML",
+        reply_markup=back_home(),
+    )
+
+
 async def trust_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query     = update.callback_query
     await query.answer()
@@ -2397,6 +2432,7 @@ def main():
     application.add_handler(CallbackQueryHandler(verify_callback,       pattern=r"^verify_"))
     application.add_handler(CallbackQueryHandler(deal_callback,         pattern=r"^deal_(accept|decline)_"))
     application.add_handler(CallbackQueryHandler(deal_action_callback,  pattern=r"^deal:(complete|cancel):"))
+    application.add_handler(CallbackQueryHandler(deal_init_callback,    pattern=r"^deal_init_\d+$"))
     application.add_handler(CallbackQueryHandler(trust_callback,        pattern=r"^trust_"))
     application.add_handler(CallbackQueryHandler(profile_callback,      pattern=r"^profile_"))
     application.add_handler(CallbackQueryHandler(menu_router,           pattern=r"^(menu:|adm:)"))
