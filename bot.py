@@ -1852,6 +1852,72 @@ async def canceldeal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # FEATURE 9 — SELLER CARD & TRUST VOTING
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def mycard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Seller posts their own spotlight card in the group to request trust votes."""
+    user = update.effective_user
+
+    # 24-hour cooldown
+    if "card_cooldown" not in context.bot_data:
+        context.bot_data["card_cooldown"] = {}
+    last_post = context.bot_data["card_cooldown"].get(user.id, 0)
+    cooldown  = 24 * 3600
+    remaining = cooldown - (time.time() - last_post)
+
+    if remaining > 0:
+        hours   = int(remaining // 3600)
+        minutes = int((remaining % 3600) // 60)
+        return await edit_or_reply(
+            update,
+            f"⏳ *Cooldown active!*\n\nYou can post your card again in *{hours}h {minutes}m*.\n\nOnly one card post per 24 hours! 🕒",
+            parse_mode="Markdown",
+            reply_markup=back_home(),
+        )
+
+    member = await get_or_create_member(user.id, user.username or "", user.full_name or "")
+    avg, count = await get_seller_avg_rating(user.id)
+    badge    = member.get("badge") or "—"
+    verified = "✅ Yes" if member.get("is_verified") else "❌ No"
+    rt       = member.get("avg_response_time") or 0
+    deals    = member.get("total_deals") or 0
+    trust    = member.get("trust_count") or 0
+    username = member.get("username") or user.username or "N/A"
+    full_name = member.get("full_name") or username
+
+    text = (
+        "🙋 *TRUST VOTE REQUEST*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 Name: {full_name}\n"
+        f"🔗 Username: @{username}\n"
+        f"⏱️ Avg Response: {rt} mins\n"
+        f"📦 Total Deals: {deals}\n"
+        f"⭐ Rating: {avg}/5 ({count} reviews)\n"
+        f"✅ Verified: {verified}\n"
+        f"🏆 Badge: {badge}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👍 Trust Votes: {trust}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🙏 *If you've dealt with me, please give a trust vote!*"
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=GROUP_ID,
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=trust_profile_kb(user.id),
+        )
+        context.bot_data["card_cooldown"][user.id] = time.time()
+        await edit_or_reply(
+            update,
+            "✅ Your spotlight card has been posted in the group!\nPeople can now give you trust votes. 👍\n\n_Next post allowed after 24 hours._",
+            parse_mode="Markdown",
+            reply_markup=back_home(),
+        )
+    except TelegramError as e:
+        logger.error(f"mycard post error: {e}")
+        await edit_or_reply(update, "❌ Failed to post card. Please try again.", reply_markup=back_home())
+
+
 async def ranking_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top = await get_top_by_trust(10)
     if not top:
@@ -1973,6 +2039,9 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data == "menu:badges":
             await badges(update, context)
+
+        elif data == "menu:mycard":
+            await mycard_cmd(update, context)
 
         elif data == "menu:help":
             await help_cmd(update, context)
@@ -2174,6 +2243,7 @@ def main():
     application.add_handler(CommandHandler("mydeals",     mydeals_cmd))
     application.add_handler(CommandHandler("dealcomplete",dealcomplete_cmd))
     application.add_handler(CommandHandler("canceldeal",  canceldeal_cmd))
+    application.add_handler(CommandHandler("mycard",      mycard_cmd))
 
     # Admin commands
     application.add_handler(CommandHandler("ban",         ban_cmd))

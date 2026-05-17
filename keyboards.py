@@ -58,6 +58,9 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
             _btn("🏅 Badges", callback_data="menu:badges", style=PRIMARY),
             _btn("❓ Help",   callback_data="menu:help",   style=PRIMARY),
         ],
+        [
+            _btn("🃏 Post My Card", callback_data="menu:mycard", style=SUCCESS),
+        ],
     ]
     if is_admin:
         rows.append([_btn("⚙️ Admin Panel", callback_data="menu:adminpanel", style=DANGER)])
