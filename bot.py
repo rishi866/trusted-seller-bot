@@ -85,6 +85,7 @@ from db import (
     set_card_cooldown,
     record_deal_confirmation,
     record_cancel_request,
+    get_member_by_username,
 )
 from keyboards import (
     main_menu,
@@ -1621,6 +1622,27 @@ async def _send_profile_card(update: Update, member: dict):
     )
 
 
+async def card_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/card @username — view any seller's profile card."""
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: <code>/card @username</code>",
+            parse_mode="HTML",
+            reply_markup=back_home(),
+        )
+        return
+    username = context.args[0].lstrip("@")
+    member = await get_member_by_username(username)
+    if not member:
+        await update.message.reply_text(
+            f"❌ No member found with username <code>@{h(username)}</code>.",
+            parse_mode="HTML",
+            reply_markup=back_home(),
+        )
+        return
+    await _send_profile_card(update, member)
+
+
 async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query     = update.callback_query
     await query.answer()
@@ -2458,6 +2480,7 @@ def main():
     application.add_handler(CommandHandler("dealcomplete",dealcomplete_cmd))
     application.add_handler(CommandHandler("canceldeal",  canceldeal_cmd))
     application.add_handler(CommandHandler("mycard",      mycard_cmd))
+    application.add_handler(CommandHandler("card",        card_cmd))
 
     # Admin commands
     application.add_handler(CommandHandler("ban",         ban_cmd))

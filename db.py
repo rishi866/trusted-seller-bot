@@ -22,6 +22,18 @@ def get_supabase() -> Client:
 # MEMBERS
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def get_member_by_username(username: str) -> Optional[dict]:
+    uname = username.lstrip("@").lower()
+    def _get():
+        res = get_supabase().table("members").select("*").ilike("username", uname).limit(1).execute()
+        return res.data[0] if res.data else None
+    try:
+        return await asyncio.to_thread(_get)
+    except Exception as e:
+        logger.error(f"get_member_by_username error: {e}")
+        return None
+
+
 async def get_member(user_id: int) -> Optional[dict]:
     def _get():
         res = get_supabase().table("members").select("*").eq("user_id", user_id).execute()
