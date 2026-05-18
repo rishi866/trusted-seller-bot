@@ -2715,6 +2715,32 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 "🃏 <b>Seller Card</b>\nUsage: <code>/sellercard @username</code>",
                                 parse_mode="HTML", reply_markup=admin_panel_kb())
 
+        elif data == "adm:editstats_info":
+            if not await is_admin(query.from_user.id, context):
+                await query.answer("Admins only!", show_alert=True)
+                return
+            await edit_or_reply(
+                update,
+                decorate(
+                    "✏️ <b>Edit User Stats</b>\n\n"
+                    "Manually set any stat for any user:\n\n"
+                    "<code>/setstats @username field value</code>\n\n"
+                    "<b>Fields:</b>\n"
+                    "• <code>trust</code> — Trust vote count\n"
+                    "• <code>deals</code> — Completed deals count\n"
+                    "• <code>referrals</code> — Referral count\n"
+                    "• <code>warnings</code> — Warning count\n"
+                    "• <code>badge</code> — Badge label (text)\n\n"
+                    "<b>Examples:</b>\n"
+                    "<code>/setstats @john trust 10</code>\n"
+                    "<code>/setstats @john deals 5</code>\n"
+                    "<code>/setstats @john referrals 20</code>\n"
+                    "<code>/setstats @john badge Star Seller</code>"
+                ),
+                parse_mode="HTML",
+                reply_markup=admin_panel_kb(),
+            )
+
         elif data == "adm:titles":
             if not await is_admin(query.from_user.id, context):
                 await query.answer("Admins only!", show_alert=True)
@@ -2767,6 +2793,72 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"menu_router error on '{data}': {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ADMIN — MANUAL STAT EDITOR
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def setstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setstats @user field value — manually override a user's stat."""
+    user = update.effective_user
+    if user.id not in ADMIN_IDS and not await is_admin(user.id, context):
+        return await update.message.reply_text("❌ Admins only.")
+
+    usage = (
+        "Usage: <code>/setstats @username field value</code>\n\n"
+        "<b>Fields:</b>\n"
+        "• <code>trust</code> — Trust vote count\n"
+        "• <code>deals</code> — Completed deals count\n"
+        "• <code>referrals</code> — Referral count\n"
+        "• <code>warnings</code> — Warning count\n"
+        "• <code>badge</code> — Badge label (text)\n\n"
+        "<b>Example:</b>\n"
+        "<code>/setstats @john trust 10</code>\n"
+        "<code>/setstats @john deals 5</code>\n"
+        "<code>/setstats @john badge Star Seller</code>"
+    )
+
+    if not context.args or len(context.args) < 3:
+        return await update.message.reply_text(usage, parse_mode="HTML")
+
+    raw_user = context.args[0].lstrip("@")
+    field    = context.args[1].lower()
+    value    = " ".join(context.args[2:])
+
+    ALLOWED = {
+        "trust":     ("trust_count",    "int"),
+        "deals":     ("deal_count",     "int"),
+        "referrals": ("referral_count", "int"),
+        "warnings":  ("warnings",       "int"),
+        "badge":     ("badge",          "str"),
+    }
+
+    if field not in ALLOWED:
+        return await update.message.reply_text(
+            f"❌ Unknown field <code>{h(field)}</code>.\n\n{usage}", parse_mode="HTML"
+        )
+
+    col, typ = ALLOWED[field]
+    if typ == "int":
+        if not value.isdigit():
+            return await update.message.reply_text("❌ Value must be a number.", parse_mode="HTML")
+        value = int(value)
+
+    target = await get_member_by_username(raw_user)
+    if not target:
+        return await update.message.reply_text(f"❌ User @{h(raw_user)} not found in database.", parse_mode="HTML")
+
+    await update_member(target["user_id"], **{col: value})
+    await update.message.reply_text(
+        decorate(
+            f"✅ <b>Stat updated!</b>\n\n"
+            f"👤 User: @{h(raw_user)}\n"
+            f"📝 Field: <code>{field}</code>\n"
+            f"✏️ New value: <code>{h(str(value))}</code>"
+        ),
+        parse_mode="HTML",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2933,6 +3025,7 @@ def main():
     application.add_handler(CommandHandler("removebadge",  removebadge))
     application.add_handler(CommandHandler("settitle",     settitle_cmd))
     application.add_handler(CommandHandler("removetitle",  removetitle_cmd))
+    application.add_handler(CommandHandler("setstats",     setstats_cmd))
     application.add_handler(CommandHandler("unverify",    unverify_cmd))
 
     # Global /cancel — fires only when NOT inside a ConversationHandler (group=1)

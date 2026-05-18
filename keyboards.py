@@ -169,6 +169,7 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
         ],
         [
             _btn("🏷️ Title Tiers",  callback_data="adm:titles",          style=SUCCESS),
+            _btn("✏️ Edit Stats",   callback_data="adm:editstats_info",  style=PRIMARY),
         ],
         [_btn("🏠 Main Menu", callback_data="menu:home", style=PRIMARY)],
     ])
