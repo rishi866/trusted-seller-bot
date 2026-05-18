@@ -235,7 +235,16 @@ async def create_listing(user_id: int, username: str, type_: str, tool_name: str
 
 async def search_listings(keyword: str) -> list:
     def _search():
-        res = get_supabase().table("listings").select("*").eq("is_active", True).ilike("tool_name", f"%{keyword}%").execute()
+        from datetime import datetime, timezone as tz
+        now_iso = datetime.now(tz.utc).isoformat()
+        res = (
+            get_supabase().table("listings")
+            .select("*")
+            .eq("is_active", True)
+            .gt("expires_at", now_iso)
+            .ilike("tool_name", f"%{keyword}%")
+            .execute()
+        )
         return res.data or []
     try:
         return await asyncio.to_thread(_search)
@@ -380,6 +389,11 @@ async def add_review(reviewer_id: int, seller_id: int, rating: int, comment: str
         existing = supabase.table("reviews").select("id").eq("reviewer_id", reviewer_id).eq("seller_id", seller_id).execute()
         if existing.data:
             return (None, "already_reviewed")
+        # Verify a completed deal exists between the two parties
+        d1 = supabase.table("deals").select("id").eq("status", "completed").eq("buyer_id", reviewer_id).eq("seller_id", seller_id).limit(1).execute()
+        d2 = supabase.table("deals").select("id").eq("status", "completed").eq("buyer_id", seller_id).eq("seller_id", reviewer_id).limit(1).execute()
+        if not d1.data and not d2.data:
+            return (None, "no_deal")
         payload = {
             "reviewer_id": reviewer_id,
             "seller_id": seller_id,

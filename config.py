@@ -11,6 +11,17 @@ GROUP_ID = int(os.getenv("GROUP_ID", "0"))
 GROUP_INVITE_LINK = os.getenv("GROUP_INVITE_LINK", "")
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
+import logging as _logging
+_log = _logging.getLogger(__name__)
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN env var is required")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("SUPABASE_URL and SUPABASE_KEY env vars are required")
+if not GROUP_ID:
+    raise ValueError("GROUP_ID env var is required")
+if not ADMIN_IDS:
+    _log.warning("ADMIN_IDS is empty — no hardcoded admins set")
+
 IST = pytz.timezone("Asia/Kolkata")
 
 CAPTCHA_TIMEOUT = 120       # seconds
