@@ -150,6 +150,30 @@ async def is_admin(user_id: int, context: ContextTypes.DEFAULT_TYPE, chat_id: in
         return False
 
 
+async def is_group_member(bot, user_id: int, group_id: int) -> bool:
+    """Check if user is an active member of the group."""
+    if not group_id:
+        return True  # no group set — no gate
+    try:
+        m = await bot.get_chat_member(group_id, user_id)
+        return m.status in [
+            ChatMember.MEMBER, ChatMember.ADMINISTRATOR,
+            ChatMember.OWNER, "restricted",
+        ]
+    except Exception:
+        return False
+
+
+async def get_group_member_count(bot, group_id: int) -> int:
+    """Return total member count for a group."""
+    if not group_id:
+        return 0
+    try:
+        return await bot.get_chat_member_count(group_id)
+    except Exception:
+        return 0
+
+
 def username_display(user) -> str:
     if user.username:
         return f"@{user.username}"
@@ -784,15 +808,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await get_or_create_member(user.id, user.username or "", user.full_name or "", referred_by)
 
     is_adm = await is_admin(user.id, context)
-    join_line = (
-        f"\n\n👥 Join our community group: {GROUP_INVITE_LINK}"
-        if GROUP_INVITE_LINK else ""
-    )
+
+    # ── Membership gate ──────────────────────────────────────────────────────
+    if GROUP_ID and not await is_group_member(context.bot, user.id, GROUP_ID):
+        kb_rows = []
+        if GROUP_INVITE_LINK:
+            kb_rows.append([InlineKeyboardButton("👥 Join the Group", url=GROUP_INVITE_LINK)])
+        kb_rows.append([InlineKeyboardButton("✅ I Joined — Verify Me", callback_data="check_membership")])
+        await update.effective_chat.send_message(
+            decorate(
+                f"👋 <b>Welcome {h(user.first_name)}!</b>\n\n"
+                "🔒 To use this bot, you need to <b>join our Telegram group</b> first.\n\n"
+                "1️⃣ Click <b>Join the Group</b> below\n"
+                "2️⃣ Complete the captcha in the group\n"
+                "3️⃣ Come back here and tap <b>I Joined</b>"
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(kb_rows),
+        )
+        return
+    # ─────────────────────────────────────────────────────────────────────────
+
+    member_count = await get_group_member_count(context.bot, GROUP_ID)
+    count_line   = f"\n👥 <b>{member_count:,}</b> members in the community" if member_count else ""
     text = decorate(
         f"👋 <b>Welcome {h(user.first_name)}!</b>\n\n"
         "🎉 Welcome to the <b>Trusted Seller</b> community!\n\n"
-        "✨ Tap a button below to get started 👇"
-        f"{join_line}"
+        f"✨ Tap a button below to get started 👇{count_line}"
     )
     await update.effective_chat.send_message(
         text,
@@ -981,11 +1023,16 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── SELL Conversation ─────────────────────────────────────────────────────────
 
 async def sell_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await get_or_create_member(
-        update.effective_user.id,
-        update.effective_user.username or "",
-        update.effective_user.full_name or "",
-    )
+    user = update.effective_user
+    await get_or_create_member(user.id, user.username or "", user.full_name or "")
+    if GROUP_ID and not await is_group_member(context.bot, user.id, GROUP_ID):
+        kb = [[InlineKeyboardButton("👥 Join Group First", url=GROUP_INVITE_LINK)]] if GROUP_INVITE_LINK else []
+        txt = "🔒 Join the group first to use this feature."
+        if update.callback_query:
+            await update.callback_query.answer(txt, show_alert=True)
+        else:
+            await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb) if kb else None)
+        return ConversationHandler.END
     # Store the group_id where the sell was initiated (None for DMs)
     chat = update.effective_chat
     context.user_data["sell_group_id"] = chat.id if chat and chat.type != "private" else None
@@ -1115,11 +1162,16 @@ async def sell_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── BUY Conversation ──────────────────────────────────────────────────────────
 
 async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await get_or_create_member(
-        update.effective_user.id,
-        update.effective_user.username or "",
-        update.effective_user.full_name or "",
-    )
+    user = update.effective_user
+    await get_or_create_member(user.id, user.username or "", user.full_name or "")
+    if GROUP_ID and not await is_group_member(context.bot, user.id, GROUP_ID):
+        kb = [[InlineKeyboardButton("👥 Join Group First", url=GROUP_INVITE_LINK)]] if GROUP_INVITE_LINK else []
+        txt = "🔒 Join the group first to use this feature."
+        if update.callback_query:
+            await update.callback_query.answer(txt, show_alert=True)
+        else:
+            await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb) if kb else None)
+        return ConversationHandler.END
     # Store the group_id where the buy request was initiated
     chat = update.effective_chat
     context.user_data["buy_group_id"] = chat.id if chat and chat.type != "private" else None
@@ -2620,6 +2672,33 @@ async def deal_init_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+async def check_membership_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User tapped 'I Joined' — re-check membership and unlock full menu."""
+    query = update.callback_query
+    user  = query.from_user
+
+    if GROUP_ID and not await is_group_member(context.bot, user.id, GROUP_ID):
+        await query.answer(
+            "❌ You are not in the group yet! Join first, complete the captcha, then try again.",
+            show_alert=True,
+        )
+        return
+
+    await query.answer("✅ Welcome!", show_alert=False)
+    is_adm = await is_admin(user.id, context)
+    member_count = await get_group_member_count(context.bot, GROUP_ID)
+    count_line   = f"\n👥 <b>{member_count:,}</b> members in the community" if member_count else ""
+    await query.message.edit_text(
+        decorate(
+            f"✅ <b>Verified! Welcome {h(user.first_name)}!</b>\n\n"
+            "🎉 You're now part of the <b>Trusted Seller</b> community!\n\n"
+            f"✨ Tap a button below to get started 👇{count_line}"
+        ),
+        parse_mode="HTML",
+        reply_markup=main_menu(is_adm),
+    )
+
+
 async def trust_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query     = update.callback_query
     voter     = query.from_user
@@ -3157,9 +3236,10 @@ def main():
     application.add_handler(CallbackQueryHandler(deal_action_callback,  pattern=r"^deal:(complete|cancel):"))
     application.add_handler(CallbackQueryHandler(deal_init_callback,    pattern=r"^deal_init_\d+$"))
     application.add_handler(CallbackQueryHandler(review_prompt_callback, pattern=r"^review_prompt_\d+$"))
-    application.add_handler(CallbackQueryHandler(trust_callback,        pattern=r"^trust_"))
-    application.add_handler(CallbackQueryHandler(profile_callback,      pattern=r"^profile_"))
-    application.add_handler(CallbackQueryHandler(menu_router,           pattern=r"^(menu:|adm:)"))
+    application.add_handler(CallbackQueryHandler(trust_callback,          pattern=r"^trust_"))
+    application.add_handler(CallbackQueryHandler(profile_callback,        pattern=r"^profile_"))
+    application.add_handler(CallbackQueryHandler(check_membership_callback, pattern=r"^check_membership$"))
+    application.add_handler(CallbackQueryHandler(menu_router,             pattern=r"^(menu:|adm:)"))
 
     # User commands
     application.add_handler(CommandHandler("start",       start))
