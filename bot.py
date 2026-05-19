@@ -91,6 +91,10 @@ from db import (
     save_custom_emoji,
     register_group,
     get_registered_groups,
+    add_gemini_links,
+    get_gemini_stats,
+    get_unclaimed_links,
+    set_link_claimed,
 )
 from keyboards import (
     main_menu,
@@ -3110,6 +3114,124 @@ async def setstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GEMINI LINK MANAGER — ADMIN ONLY
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Conversation state for /addlinks
+ADDLINKS_WAIT = 90
+
+
+async def addlinks_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/addlinks — admin pastes links one per line."""
+    if not await is_admin(update.effective_user.id, context):
+        return await update.message.reply_text("❌ Admins only.")
+    await update.message.reply_text(
+        "📋 <b>Paste your Gemini links</b> (one per line).\n\n"
+        "Send /cancel to abort.",
+        parse_mode="HTML",
+    )
+    return ADDLINKS_WAIT
+
+
+async def addlinks_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive pasted links, bulk insert, report results."""
+    if not await is_admin(update.effective_user.id, context):
+        return ConversationHandler.END
+    raw   = update.message.text or ""
+    links = [l.strip() for l in raw.splitlines() if l.strip()]
+    if not links:
+        await update.message.reply_text("❌ No links found. Try again or /cancel.")
+        return ADDLINKS_WAIT
+
+    await update.message.reply_text(f"⏳ Processing {len(links)} links...")
+    added, dupes = await add_gemini_links(links, update.effective_user.id)
+    stats = await get_gemini_stats()
+    await update.message.reply_text(
+        decorate(
+            f"✅ <b>Links Uploaded!</b>\n\n"
+            f"➕ Added: <b>{added}</b>\n"
+            f"⚠️ Duplicates skipped: <b>{dupes}</b>\n\n"
+            f"📦 Total in DB: <b>{stats['total']}</b>\n"
+            f"✅ Claimed: <b>{stats['claimed']}</b>\n"
+            f"❌ Unclaimed: <b>{stats['unclaimed']}</b>"
+        ),
+        parse_mode="HTML",
+    )
+    return ConversationHandler.END
+
+
+async def addlinks_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Cancelled.")
+    return ConversationHandler.END
+
+
+async def linkstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/linkstats — show claimed/unclaimed counts."""
+    if not await is_admin(update.effective_user.id, context):
+        return await update.message.reply_text("❌ Admins only.")
+    stats = await get_gemini_stats()
+    await update.message.reply_text(
+        decorate(
+            "🔗 <b>Gemini Link Stats</b>\n\n"
+            f"📦 Total Links: <b>{stats['total']}</b>\n"
+            f"✅ Claimed: <b>{stats['claimed']}</b>\n"
+            f"❌ Unclaimed: <b>{stats['unclaimed']}</b>"
+        ),
+        parse_mode="HTML",
+    )
+
+
+async def unclaimed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/unclaimed — send all unclaimed links as a .txt file."""
+    if not await is_admin(update.effective_user.id, context):
+        return await update.message.reply_text("❌ Admins only.")
+    links = await get_unclaimed_links()
+    if not links:
+        return await update.message.reply_text("✅ No unclaimed links!")
+
+    # Build txt content: id | link
+    lines = [f"#{row['id']} | {row['link']}" for row in links]
+    content = "\n".join(lines).encode("utf-8")
+
+    import io
+    buf = io.BytesIO(content)
+    buf.name = "unclaimed_links.txt"
+    await update.message.reply_document(
+        document=buf,
+        filename="unclaimed_links.txt",
+        caption=f"❌ Unclaimed Links: {len(links)}",
+    )
+
+
+async def claimlink_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/claimlink <id> — mark a link as claimed."""
+    if not await is_admin(update.effective_user.id, context):
+        return await update.message.reply_text("❌ Admins only.")
+    if not context.args or not context.args[0].isdigit():
+        return await update.message.reply_text("Usage: <code>/claimlink &lt;id&gt;</code>", parse_mode="HTML")
+    link_id = int(context.args[0])
+    ok = await set_link_claimed(link_id, True)
+    if ok:
+        await update.message.reply_text(f"✅ Link #{link_id} marked as <b>claimed</b>.", parse_mode="HTML")
+    else:
+        await update.message.reply_text(f"❌ Link #{link_id} not found.")
+
+
+async def unclaimlink_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/unclaimlink <id> — mark a link as unclaimed."""
+    if not await is_admin(update.effective_user.id, context):
+        return await update.message.reply_text("❌ Admins only.")
+    if not context.args or not context.args[0].isdigit():
+        return await update.message.reply_text("Usage: <code>/unclaimlink &lt;id&gt;</code>", parse_mode="HTML")
+    link_id = int(context.args[0])
+    ok = await set_link_claimed(link_id, False)
+    if ok:
+        await update.message.reply_text(f"✅ Link #{link_id} marked as <b>unclaimed</b>.", parse_mode="HTML")
+    else:
+        await update.message.reply_text(f"❌ Link #{link_id} not found.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SCHEDULING SETUP
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -3229,6 +3351,16 @@ def main():
     application.add_handler(buy_conv)
     application.add_handler(search_conv)
 
+    addlinks_conv = ConversationHandler(
+        entry_points=[CommandHandler("addlinks", addlinks_start)],
+        states={
+            ADDLINKS_WAIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, addlinks_receive)],
+        },
+        fallbacks=[CommandHandler("cancel", addlinks_cancel)],
+        conversation_timeout=10 * 60,
+    )
+    application.add_handler(addlinks_conv)
+
     # Callback queries
     application.add_handler(CallbackQueryHandler(captcha_callback,      pattern=r"^captcha_"))
     application.add_handler(CallbackQueryHandler(verify_callback,       pattern=r"^verify_"))
@@ -3285,6 +3417,10 @@ def main():
     application.add_handler(CommandHandler("removetitle",  removetitle_cmd))
     application.add_handler(CommandHandler("setstats",     setstats_cmd))
     application.add_handler(CommandHandler("unverify",    unverify_cmd))
+    application.add_handler(CommandHandler("linkstats",   linkstats_cmd))
+    application.add_handler(CommandHandler("unclaimed",   unclaimed_cmd))
+    application.add_handler(CommandHandler("claimlink",   claimlink_cmd))
+    application.add_handler(CommandHandler("unclaimlink", unclaimlink_cmd))
 
     # Global /cancel — fires only when NOT inside a ConversationHandler (group=1)
     async def _global_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):

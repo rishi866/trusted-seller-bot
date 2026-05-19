@@ -815,3 +815,76 @@ async def get_verified_sellers() -> list:
     except Exception as e:
         logger.error(f"get_verified_sellers error: {e}")
         return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GEMINI LINK MANAGER
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def add_gemini_links(links: list[str], added_by: int) -> tuple[int, int]:
+    """Bulk insert links. Returns (added_count, duplicate_count)."""
+    def _add():
+        supabase  = get_supabase()
+        added     = 0
+        duplicate = 0
+        for link in links:
+            link = link.strip()
+            if not link:
+                continue
+            try:
+                supabase.table("gemini_links").insert({
+                    "link":     link,
+                    "added_by": added_by,
+                }).execute()
+                added += 1
+            except Exception:
+                duplicate += 1
+        return added, duplicate
+    try:
+        return await asyncio.to_thread(_add)
+    except Exception as e:
+        logger.error(f"add_gemini_links error: {e}")
+        return 0, 0
+
+
+async def get_gemini_stats() -> dict:
+    """Return total, claimed, unclaimed counts."""
+    def _get():
+        supabase  = get_supabase()
+        total     = supabase.table("gemini_links").select("id", count="exact").execute().count or 0
+        claimed   = supabase.table("gemini_links").select("id", count="exact").eq("is_claimed", True).execute().count or 0
+        unclaimed = supabase.table("gemini_links").select("id", count="exact").eq("is_claimed", False).execute().count or 0
+        return {"total": total, "claimed": claimed, "unclaimed": unclaimed}
+    try:
+        return await asyncio.to_thread(_get)
+    except Exception as e:
+        logger.error(f"get_gemini_stats error: {e}")
+        return {"total": 0, "claimed": 0, "unclaimed": 0}
+
+
+async def get_unclaimed_links() -> list:
+    """Return all unclaimed links."""
+    def _get():
+        res = get_supabase().table("gemini_links").select("id, link").eq("is_claimed", False).order("id").execute()
+        return res.data or []
+    try:
+        return await asyncio.to_thread(_get)
+    except Exception as e:
+        logger.error(f"get_unclaimed_links error: {e}")
+        return []
+
+
+async def set_link_claimed(link_id: int, is_claimed: bool) -> bool:
+    """Mark a link as claimed or unclaimed by ID."""
+    def _set():
+        supabase = get_supabase()
+        existing = supabase.table("gemini_links").select("id").eq("id", link_id).execute()
+        if not existing.data:
+            return False
+        supabase.table("gemini_links").update({"is_claimed": is_claimed}).eq("id", link_id).execute()
+        return True
+    try:
+        return await asyncio.to_thread(_set)
+    except Exception as e:
+        logger.error(f"set_link_claimed error: {e}")
+        return False
