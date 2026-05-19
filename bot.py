@@ -3130,35 +3130,61 @@ SETCOOKIE_WAIT = 91
 
 
 async def addlinks_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/addlinks — admin pastes links one per line."""
+    """/addlinks — admin uploads a .txt file or pastes links one per line."""
     if not await is_admin(update.effective_user.id, context):
         return await update.message.reply_text("❌ Admins only.")
     await update.message.reply_text(
-        "📋 <b>Paste your Gemini links</b> (one per line).\n\n"
-        "Send /cancel to abort.",
+        "📋 <b>Gemini Links Upload</b>\n\n"
+        "Ek <b>.txt file bhejo</b> jisme har line me ek link ho.\n"
+        "Ya seedha links paste karo (chhoti list ke liye).\n\n"
+        "<i>Send /cancel to abort.</i>",
         parse_mode="HTML",
     )
     return ADDLINKS_WAIT
 
 
 async def addlinks_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive pasted links, bulk insert, report results."""
+    """Receive links via .txt file upload or plain text paste."""
     if not await is_admin(update.effective_user.id, context):
         return ConversationHandler.END
-    raw   = update.message.text or ""
-    links = [l.strip() for l in raw.splitlines() if l.strip()]
+
+    raw = ""
+
+    # ── File upload ───────────────────────────────────────────────────────────
+    if update.message.document:
+        doc = update.message.document
+        if doc.file_size and doc.file_size > 500_000:   # 500 KB limit
+            await update.message.reply_text("❌ File too large (max 500 KB).")
+            return ADDLINKS_WAIT
+        try:
+            file = await doc.get_file()
+            data = await file.download_as_bytearray()
+            raw  = data.decode("utf-8", errors="replace")
+        except Exception as exc:
+            await update.message.reply_text(f"❌ File read error: {exc}\nTry again or /cancel.")
+            return ADDLINKS_WAIT
+
+    # ── Plain text ────────────────────────────────────────────────────────────
+    elif update.message.text:
+        raw = update.message.text
+
+    links = [l.strip() for l in raw.splitlines() if l.strip() and l.strip().startswith("http")]
     if not links:
-        await update.message.reply_text("❌ No links found. Try again or /cancel.")
+        await update.message.reply_text(
+            "❌ Koi valid link nahi mila.\n"
+            "Har line me ek link hona chahiye (http se shuru).\n"
+            "Try again or /cancel."
+        )
         return ADDLINKS_WAIT
 
-    await update.message.reply_text(f"⏳ Processing {len(links)} links...")
+    await update.message.reply_text(f"⏳ Processing <b>{len(links)}</b> links...", parse_mode="HTML")
     added, dupes = await add_gemini_links(links, update.effective_user.id)
     stats = await get_gemini_stats()
     await update.message.reply_text(
         decorate(
             f"✅ <b>Links Uploaded!</b>\n\n"
             f"➕ Added: <b>{added}</b>\n"
-            f"⚠️ Duplicates skipped: <b>{dupes}</b>\n\n"
+            f"♻️ Duplicates skipped: <b>{dupes}</b>\n\n"
             f"📦 Total in DB: <b>{stats['total']}</b>\n"
             f"✅ Claimed: <b>{stats['claimed']}</b>\n"
             f"❌ Unclaimed: <b>{stats['unclaimed']}</b>"
@@ -3629,7 +3655,10 @@ def main():
     addlinks_conv = ConversationHandler(
         entry_points=[CommandHandler("addlinks", addlinks_start)],
         states={
-            ADDLINKS_WAIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, addlinks_receive)],
+            ADDLINKS_WAIT: [
+                MessageHandler(filters.Document.ALL, addlinks_receive),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, addlinks_receive),
+            ],
         },
         fallbacks=[CommandHandler("cancel", addlinks_cancel)],
         conversation_timeout=10 * 60,
