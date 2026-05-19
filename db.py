@@ -93,15 +93,21 @@ async def get_all_members() -> list:
 # REFERRALS
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def add_referral(referrer_id: int, referred_id: int):
+async def add_referral(referrer_id: int, referred_id: int, group_id: Optional[int] = None):
     """Returns new referral count or False on failure/duplicate."""
     def _add():
         supabase = get_supabase()
-        # Check duplicate
-        existing = supabase.table("referrals").select("id").eq("referred_id", referred_id).execute()
+        # Check duplicate (per group if provided, else global)
+        q = supabase.table("referrals").select("id").eq("referred_id", referred_id)
+        if group_id is not None:
+            q = q.eq("group_id", group_id)
+        existing = q.execute()
         if existing.data:
             return False
-        supabase.table("referrals").insert({"referrer_id": referrer_id, "referred_id": referred_id}).execute()
+        payload = {"referrer_id": referrer_id, "referred_id": referred_id}
+        if group_id is not None:
+            payload["group_id"] = group_id
+        supabase.table("referrals").insert(payload).execute()
         # Increment referral_count
         member = supabase.table("members").select("referral_count").eq("user_id", referrer_id).execute()
         if not member.data:
@@ -142,9 +148,12 @@ async def get_top_referrers(limit: int = 10) -> list:
 # BADGES
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def get_all_badges() -> list:
+async def get_all_badges(group_id: Optional[int] = None) -> list:
     def _get():
-        res = get_supabase().table("badge_config").select("*").order("required_count", desc=False).execute()
+        q = get_supabase().table("badge_config").select("*")
+        if group_id is not None:
+            q = q.eq("group_id", group_id)
+        res = q.order("required_count", desc=False).execute()
         return res.data or []
     try:
         return await asyncio.to_thread(_get)
@@ -153,14 +162,24 @@ async def get_all_badges() -> list:
         return []
 
 
-async def set_badge_config(required_count: int, badge_name: str, is_admin_level: bool = False) -> bool:
+async def set_badge_config(required_count: int, badge_name: str, is_admin_level: bool = False, group_id: Optional[int] = None) -> bool:
     def _set():
         supabase = get_supabase()
-        existing = supabase.table("badge_config").select("id").eq("required_count", required_count).execute()
+        q = supabase.table("badge_config").select("id").eq("required_count", required_count)
+        if group_id is not None:
+            q = q.eq("group_id", group_id)
+        existing = q.execute()
         if existing.data:
-            supabase.table("badge_config").update({"badge_name": badge_name, "is_admin_level": is_admin_level}).eq("required_count", required_count).execute()
+            upd = {"badge_name": badge_name, "is_admin_level": is_admin_level}
+            uq = supabase.table("badge_config").update(upd).eq("required_count", required_count)
+            if group_id is not None:
+                uq = uq.eq("group_id", group_id)
+            uq.execute()
         else:
-            supabase.table("badge_config").insert({"required_count": required_count, "badge_name": badge_name, "is_admin_level": is_admin_level}).execute()
+            payload = {"required_count": required_count, "badge_name": badge_name, "is_admin_level": is_admin_level}
+            if group_id is not None:
+                payload["group_id"] = group_id
+            supabase.table("badge_config").insert(payload).execute()
         return True
     try:
         return await asyncio.to_thread(_set)
@@ -169,9 +188,12 @@ async def set_badge_config(required_count: int, badge_name: str, is_admin_level:
         return False
 
 
-async def remove_badge_config(required_count: int) -> bool:
+async def remove_badge_config(required_count: int, group_id: Optional[int] = None) -> bool:
     def _remove():
-        get_supabase().table("badge_config").delete().eq("required_count", required_count).execute()
+        q = get_supabase().table("badge_config").delete().eq("required_count", required_count)
+        if group_id is not None:
+            q = q.eq("group_id", group_id)
+        q.execute()
         return True
     try:
         return await asyncio.to_thread(_remove)
@@ -180,10 +202,13 @@ async def remove_badge_config(required_count: int) -> bool:
         return False
 
 
-async def get_badge_for_count(count: int) -> Optional[dict]:
+async def get_badge_for_count(count: int, group_id: Optional[int] = None) -> Optional[dict]:
     """Returns the highest badge the user has earned."""
     def _get():
-        res = get_supabase().table("badge_config").select("*").lte("required_count", count).order("required_count", desc=True).limit(1).execute()
+        q = get_supabase().table("badge_config").select("*").lte("required_count", count)
+        if group_id is not None:
+            q = q.eq("group_id", group_id)
+        res = q.order("required_count", desc=True).limit(1).execute()
         return res.data[0] if res.data else None
     try:
         return await asyncio.to_thread(_get)
@@ -192,10 +217,13 @@ async def get_badge_for_count(count: int) -> Optional[dict]:
         return None
 
 
-async def get_next_badge(count: int) -> Optional[dict]:
+async def get_next_badge(count: int, group_id: Optional[int] = None) -> Optional[dict]:
     """Returns the next badge milestone above the current count."""
     def _get():
-        res = get_supabase().table("badge_config").select("*").gt("required_count", count).order("required_count", desc=False).limit(1).execute()
+        q = get_supabase().table("badge_config").select("*").gt("required_count", count)
+        if group_id is not None:
+            q = q.eq("group_id", group_id)
+        res = q.order("required_count", desc=False).limit(1).execute()
         return res.data[0] if res.data else None
     try:
         return await asyncio.to_thread(_get)
@@ -208,7 +236,7 @@ async def get_next_badge(count: int) -> Optional[dict]:
 # LISTINGS
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def create_listing(user_id: int, username: str, type_: str, tool_name: str, price: str, description: str, file_id: Optional[str] = None) -> Optional[dict]:
+async def create_listing(user_id: int, username: str, type_: str, tool_name: str, price: str, description: str, file_id: Optional[str] = None, group_id: Optional[int] = None) -> Optional[dict]:
     def _create():
         from datetime import timezone as tz
         now = datetime.now(tz.utc)
@@ -224,6 +252,8 @@ async def create_listing(user_id: int, username: str, type_: str, tool_name: str
             "expires_at": expires_at,
             "is_active": True,
         }
+        if group_id is not None:
+            payload["group_id"] = group_id
         res = get_supabase().table("listings").insert(payload).execute()
         return res.data[0] if res.data else None
     try:
@@ -233,18 +263,20 @@ async def create_listing(user_id: int, username: str, type_: str, tool_name: str
         return None
 
 
-async def search_listings(keyword: str) -> list:
+async def search_listings(keyword: str, group_id: Optional[int] = None) -> list:
     def _search():
         from datetime import datetime, timezone as tz
         now_iso = datetime.now(tz.utc).isoformat()
-        res = (
+        q = (
             get_supabase().table("listings")
             .select("*")
             .eq("is_active", True)
             .gt("expires_at", now_iso)
             .ilike("tool_name", f"%{keyword}%")
-            .execute()
         )
+        if group_id is not None:
+            q = q.eq("group_id", group_id)
+        res = q.execute()
         return res.data or []
     try:
         return await asyncio.to_thread(_search)
@@ -289,11 +321,16 @@ async def expire_old_listings():
         logger.error(f"expire_old_listings error: {e}")
 
 
-async def get_active_listing_counts() -> tuple:
+async def get_active_listing_counts(group_id: Optional[int] = None) -> tuple:
     def _get():
         supabase = get_supabase()
-        sell = supabase.table("listings").select("id", count="exact").eq("is_active", True).eq("type", "sell").execute()
-        buy = supabase.table("listings").select("id", count="exact").eq("is_active", True).eq("type", "buy").execute()
+        sq = supabase.table("listings").select("id", count="exact").eq("is_active", True).eq("type", "sell")
+        bq = supabase.table("listings").select("id", count="exact").eq("is_active", True).eq("type", "buy")
+        if group_id is not None:
+            sq = sq.eq("group_id", group_id)
+            bq = bq.eq("group_id", group_id)
+        sell = sq.execute()
+        buy  = bq.execute()
         return (sell.count or 0, buy.count or 0)
     try:
         return await asyncio.to_thread(_get)
@@ -306,9 +343,12 @@ async def get_active_listing_counts() -> tuple:
 # SCAM WORDS
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def get_scam_words() -> list:
+async def get_scam_words(group_id: Optional[int] = None) -> list:
     def _get():
-        res = get_supabase().table("scam_words").select("word").execute()
+        q = get_supabase().table("scam_words").select("word")
+        if group_id is not None:
+            q = q.eq("group_id", group_id)
+        res = q.execute()
         return [row["word"] for row in res.data] if res.data else []
     try:
         words = await asyncio.to_thread(_get)
@@ -318,13 +358,19 @@ async def get_scam_words() -> list:
         return DEFAULT_SCAM_WORDS
 
 
-async def add_scam_word(word: str, added_by: int) -> bool:
+async def add_scam_word(word: str, added_by: int, group_id: Optional[int] = None) -> bool:
     def _add():
         supabase = get_supabase()
-        existing = supabase.table("scam_words").select("id").eq("word", word.lower()).execute()
+        q = supabase.table("scam_words").select("id").eq("word", word.lower())
+        if group_id is not None:
+            q = q.eq("group_id", group_id)
+        existing = q.execute()
         if existing.data:
             return False
-        supabase.table("scam_words").insert({"word": word.lower(), "added_by": added_by}).execute()
+        payload = {"word": word.lower(), "added_by": added_by}
+        if group_id is not None:
+            payload["group_id"] = group_id
+        supabase.table("scam_words").insert(payload).execute()
         return True
     try:
         return await asyncio.to_thread(_add)
@@ -333,18 +379,54 @@ async def add_scam_word(word: str, added_by: int) -> bool:
         return False
 
 
-async def remove_scam_word(word: str) -> bool:
+async def remove_scam_word(word: str, group_id: Optional[int] = None) -> bool:
     def _remove():
-        res = get_supabase().table("scam_words").select("id").eq("word", word.lower()).execute()
+        supabase = get_supabase()
+        q = supabase.table("scam_words").select("id").eq("word", word.lower())
+        if group_id is not None:
+            q = q.eq("group_id", group_id)
+        res = q.execute()
         if not res.data:
             return False
-        get_supabase().table("scam_words").delete().eq("word", word.lower()).execute()
+        dq = supabase.table("scam_words").delete().eq("word", word.lower())
+        if group_id is not None:
+            dq = dq.eq("group_id", group_id)
+        dq.execute()
         return True
     try:
         return await asyncio.to_thread(_remove)
     except Exception as e:
         logger.error(f"remove_scam_word error: {e}")
         return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GROUPS REGISTRY
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def register_group(group_id: int, title: str = "", invite_link: str = "") -> bool:
+    """Upsert a group into the groups table."""
+    def _reg():
+        payload = {"group_id": group_id, "title": title or "", "invite_link": invite_link or ""}
+        get_supabase().table("groups").upsert(payload, on_conflict="group_id").execute()
+        return True
+    try:
+        return await asyncio.to_thread(_reg)
+    except Exception as e:
+        logger.error(f"register_group error: {e}")
+        return False
+
+
+async def get_registered_groups() -> list:
+    """Returns list of all group_ids from the groups table."""
+    def _get():
+        res = get_supabase().table("groups").select("group_id").execute()
+        return [row["group_id"] for row in res.data] if res.data else []
+    try:
+        return await asyncio.to_thread(_get)
+    except Exception as e:
+        logger.error(f"get_registered_groups error: {e}")
+        return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -17,10 +17,14 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN env var is required")
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("SUPABASE_URL and SUPABASE_KEY env vars are required")
+# GROUP_ID is now optional — 0 means "all groups mode"
 if not GROUP_ID:
-    raise ValueError("GROUP_ID env var is required")
+    _log.info("GROUP_ID not set — running in all-groups mode")
 if not ADMIN_IDS:
     _log.warning("ADMIN_IDS is empty — no hardcoded admins set")
+
+# Alias for clarity: SUPERADMIN_IDS can manage any group
+SUPERADMIN_IDS = ADMIN_IDS
 
 IST = pytz.timezone("Asia/Kolkata")
 

@@ -33,6 +33,7 @@ from config import (
     GROUP_ID,
     GROUP_INVITE_LINK,
     ADMIN_IDS,
+    SUPERADMIN_IDS,
     IST,
     CAPTCHA_TIMEOUT,
     FLOOD_MSG_COUNT,
@@ -88,6 +89,8 @@ from db import (
     record_cancel_request,
     get_member_by_username,
     save_custom_emoji,
+    register_group,
+    get_registered_groups,
 )
 from keyboards import (
     main_menu,
@@ -133,11 +136,15 @@ SEARCH_QUERY = 7
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def is_admin(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    if user_id in ADMIN_IDS:
+async def is_admin(user_id: int, context: ContextTypes.DEFAULT_TYPE, chat_id: int = None) -> bool:
+    if user_id in SUPERADMIN_IDS:
         return True
+    # Determine which chat to check admin status in
+    target_chat = chat_id if chat_id else GROUP_ID
+    if not target_chat:
+        return False
     try:
-        member = await context.bot.get_chat_member(GROUP_ID, user_id)
+        member = await context.bot.get_chat_member(target_chat, user_id)
         return member.status in [ChatMember.ADMINISTRATOR, ChatMember.OWNER]
     except Exception:
         return False
@@ -221,11 +228,14 @@ async def post_seller_card(bot, seller_id: int, chat_id: int):
         logger.error(f"post_seller_card error: {e}")
 
 
-async def _set_member_title(bot, user_id: int, title: str) -> bool:
+async def _set_member_title(bot, user_id: int, title: str, group_id: int = None) -> bool:
     """Promote user with zero admin permissions and set a custom title."""
+    chat = group_id if group_id else GROUP_ID
+    if not chat:
+        return False
     try:
         await bot.promote_chat_member(
-            chat_id=GROUP_ID,
+            chat_id=chat,
             user_id=user_id,
             can_manage_chat=True,   # minimum required to hold a title
             can_delete_messages=False,
@@ -238,7 +248,7 @@ async def _set_member_title(bot, user_id: int, title: str) -> bool:
             is_anonymous=False,
         )
         await bot.set_chat_administrator_custom_title(
-            chat_id=GROUP_ID,
+            chat_id=chat,
             user_id=user_id,
             custom_title=title[:16],  # Telegram max 16 chars
         )
@@ -248,11 +258,14 @@ async def _set_member_title(bot, user_id: int, title: str) -> bool:
         return False
 
 
-async def _remove_member_title(bot, user_id: int) -> bool:
+async def _remove_member_title(bot, user_id: int, group_id: int = None) -> bool:
     """Revoke the zero-permission admin role (removes custom title)."""
+    chat = group_id if group_id else GROUP_ID
+    if not chat:
+        return False
     try:
         await bot.promote_chat_member(
-            chat_id=GROUP_ID,
+            chat_id=chat,
             user_id=user_id,
             can_manage_chat=False,
             can_delete_messages=False,
@@ -269,8 +282,8 @@ async def _remove_member_title(bot, user_id: int) -> bool:
         return False
 
 
-async def check_and_update_badge(user_id, old_count, new_count, bot, chat_id, username):
-    all_badges = await get_all_badges()
+async def check_and_update_badge(user_id, old_count, new_count, bot, chat_id, username, group_id: int = None):
+    all_badges = await get_all_badges(group_id=group_id)
     earned_badges = [b for b in all_badges if old_count < b["required_count"] <= new_count]
     if not earned_badges:
         return
@@ -280,7 +293,7 @@ async def check_and_update_badge(user_id, old_count, new_count, bot, chat_id, us
     # Auto-set Telegram group title for each title tier earned
     for earned in sorted(earned_badges, key=lambda b: b["required_count"]):
         if earned.get("is_admin_level"):
-            await _set_member_title(bot, user_id, earned["badge_name"])
+            await _set_member_title(bot, user_id, earned["badge_name"], group_id=group_id or chat_id)
     try:
         names = " → ".join(h(b["badge_name"]) for b in sorted(earned_badges, key=lambda b: b["required_count"]))
         title_line = f"\n🏷️ Your group title has been updated to <b>{h(top['badge_name'])}</b>!" if top.get("is_admin_level") else ""
@@ -304,8 +317,9 @@ async def check_and_update_badge(user_id, old_count, new_count, bot, chat_id, us
 
 async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = update.chat_member
-    if not result or result.chat.id != GROUP_ID:
+    if not result:
         return
+    chat_id = result.chat.id
     old_status = result.old_chat_member.status
     new_status = result.new_chat_member.status
     if old_status not in [ChatMember.LEFT, ChatMember.BANNED] or new_status != ChatMember.MEMBER:
@@ -325,17 +339,17 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
     referred_by = member.get("referred_by") if member else None
     if referred_by and referred_by != user_id:
         old_count = await get_referral_count(referred_by)
-        new_count = await add_referral(referred_by, user_id)
+        new_count = await add_referral(referred_by, user_id, group_id=chat_id)
         if new_count:
             referrer = await get_member(referred_by)
             referrer_username = referrer.get("username", "") if referrer else ""
             await check_and_update_badge(
                 referred_by, old_count, new_count,
-                context.bot, GROUP_ID, referrer_username,
+                context.bot, chat_id, referrer_username, group_id=chat_id,
             )
 
     try:
-        await context.bot.restrict_chat_member(chat_id=GROUP_ID, user_id=user_id, permissions=MUTED)
+        await context.bot.restrict_chat_member(chat_id=chat_id, user_id=user_id, permissions=MUTED)
     except TelegramError as e:
         logger.warning(f"Could not mute new member {user_id}: {e}")
 
@@ -369,7 +383,7 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         msg = await context.bot.send_message(
-            chat_id=GROUP_ID,
+            chat_id=chat_id,
             text=decorate(
                 f"👋 <b>Welcome @{username}!</b>\n"
                 f"🔒 Prove you are human — <b>{a} {op} {b} = ?</b>\n"
@@ -380,7 +394,7 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         if "pending_captcha" not in context.bot_data:
             context.bot_data["pending_captcha"] = {}
-        context.bot_data["pending_captcha"][user_id] = {"msg_id": msg.message_id}
+        context.bot_data["pending_captcha"][user_id] = {"msg_id": msg.message_id, "chat_id": chat_id}
     except TelegramError as e:
         logger.error(f"Captcha send error: {e}")
         return
@@ -388,7 +402,7 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.job_queue.run_once(
         kick_unverified,
         when=CAPTCHA_TIMEOUT,
-        data={"user_id": user_id, "chat_id": GROUP_ID},
+        data={"user_id": user_id, "chat_id": chat_id},
         name=f"kick_if_not_verified_{user_id}",
     )
 
@@ -415,25 +429,26 @@ async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     captcha_info = pending.pop(target_user_id)
-    msg_id = captcha_info.get("msg_id")
+    msg_id   = captcha_info.get("msg_id")
+    captcha_chat_id = captcha_info.get("chat_id") or GROUP_ID
 
     for job in context.job_queue.get_jobs_by_name(f"kick_if_not_verified_{target_user_id}"):
         job.schedule_removal()
 
     try:
-        await context.bot.delete_message(chat_id=GROUP_ID, message_id=msg_id)
+        await context.bot.delete_message(chat_id=captcha_chat_id, message_id=msg_id)
     except TelegramError:
         pass
 
     if is_correct:
         await query.answer("✅ Correct! Welcome!", show_alert=False)
         try:
-            await context.bot.restrict_chat_member(chat_id=GROUP_ID, user_id=target_user_id, permissions=UNMUTED)
+            await context.bot.restrict_chat_member(chat_id=captcha_chat_id, user_id=target_user_id, permissions=UNMUTED)
         except TelegramError as e:
             logger.error(f"Unmute error: {e}")
         try:
             await context.bot.send_message(
-                chat_id=GROUP_ID,
+                chat_id=captcha_chat_id,
                 text=decorate(
                     f"✅ <b>Welcome to Trusted Seller, {h(username_display(voter))}!</b> 🎉\n"
                     "📋 Read the rules, explore listings, and enjoy trading! 🚀"
@@ -445,13 +460,13 @@ async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("❌ Wrong answer!", show_alert=True)
         try:
-            await context.bot.ban_chat_member(chat_id=GROUP_ID, user_id=target_user_id)
-            await context.bot.unban_chat_member(chat_id=GROUP_ID, user_id=target_user_id)
+            await context.bot.ban_chat_member(chat_id=captcha_chat_id, user_id=target_user_id)
+            await context.bot.unban_chat_member(chat_id=captcha_chat_id, user_id=target_user_id)
         except TelegramError as e:
             logger.error(f"Kick error: {e}")
         try:
             await context.bot.send_message(
-                chat_id=GROUP_ID,
+                chat_id=captcha_chat_id,
                 text=f"❌ {username_display(voter)} answered the captcha wrong and was removed! 🚫",
             )
         except TelegramError:
@@ -494,11 +509,10 @@ async def link_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg or not msg.text:
         return
-    if msg.chat.id != GROUP_ID:
-        return
+    chat_id = msg.chat.id
 
     user = update.effective_user
-    if not user or await is_admin(user.id, context):
+    if not user or await is_admin(user.id, context, chat_id=chat_id):
         return
 
     if re.search(r'(https?://|www\.|t\.me/|@\w+\.\w+)', msg.text, re.IGNORECASE):
@@ -509,13 +523,13 @@ async def link_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         until = datetime.now(timezone.utc) + timedelta(minutes=5)
         try:
             await context.bot.restrict_chat_member(
-                chat_id=GROUP_ID, user_id=user.id, permissions=MUTED, until_date=until,
+                chat_id=chat_id, user_id=user.id, permissions=MUTED, until_date=until,
             )
         except TelegramError:
             pass
         try:
             await context.bot.send_message(
-                chat_id=GROUP_ID,
+                chat_id=chat_id,
                 text=(
                     f"⚠️ {username_display(user)}, links are not allowed without admin permission!\n"
                     "You have been muted for 5 minutes. 🔇"
@@ -529,14 +543,13 @@ async def scam_word_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg or not (msg.text or msg.caption):
         return
-    if msg.chat.id != GROUP_ID:
-        return
+    chat_id = msg.chat.id
 
     user = update.effective_user
-    if not user or await is_admin(user.id, context):
+    if not user or await is_admin(user.id, context, chat_id=chat_id):
         return
 
-    scam_words = context.bot_data.get("scam_words_cache", [])
+    scam_words = context.bot_data.get(f"scam_{chat_id}", context.bot_data.get("scam_words_cache", []))
     text_lower = (msg.text or msg.caption or "").lower()
     for word in scam_words:
         if re.search(rf"\b{re.escape(word.lower())}\b", text_lower):
@@ -546,7 +559,7 @@ async def scam_word_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             try:
                 await context.bot.send_message(
-                    chat_id=GROUP_ID,
+                    chat_id=chat_id,
                     text=(
                         f"🚨 {username_display(user)}, a scam-related keyword was detected!\n"
                         "Your message has been deleted. Please follow community rules. ⚠️"
@@ -561,11 +574,10 @@ async def anti_flood_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg:
         return
-    if msg.chat.id != GROUP_ID:
-        return
+    chat_id = msg.chat.id
 
     user = update.effective_user
-    if not user or await is_admin(user.id, context):
+    if not user or await is_admin(user.id, context, chat_id=chat_id):
         return
 
     if "flood_tracker" not in context.bot_data:
@@ -573,7 +585,8 @@ async def anti_flood_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     now     = time.time()
     tracker = context.bot_data["flood_tracker"]
-    uid     = user.id
+    # Key by (chat_id, user_id) so flood tracking is per group
+    uid     = (chat_id, user.id)
 
     tracker.setdefault(uid, [])
     tracker[uid] = [t for t in tracker[uid] if now - t < FLOOD_TIME_WINDOW]
@@ -584,13 +597,13 @@ async def anti_flood_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         until = datetime.now(timezone.utc) + timedelta(seconds=FLOOD_MUTE_DURATION)
         try:
             await context.bot.restrict_chat_member(
-                chat_id=GROUP_ID, user_id=uid, permissions=MUTED, until_date=until,
+                chat_id=chat_id, user_id=user.id, permissions=MUTED, until_date=until,
             )
         except TelegramError:
             pass
         try:
             await context.bot.send_message(
-                chat_id=GROUP_ID,
+                chat_id=chat_id,
                 text=(
                     f"🌊 Anti-Flood! {username_display(user)} sent too many messages too fast!\n"
                     "Muted for 10 minutes. 🔇"
@@ -600,10 +613,38 @@ async def anti_flood_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+async def my_chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fires when the bot itself is added to / removed from a chat."""
+    result = update.my_chat_member
+    if not result:
+        return
+    new_status = result.new_chat_member.status
+    chat = result.chat
+    # Register when bot becomes member or admin of a group/supergroup
+    if chat.type in ("group", "supergroup") and new_status in (ChatMember.MEMBER, ChatMember.ADMINISTRATOR):
+        invite_link = ""
+        try:
+            chat_info = await context.bot.get_chat(chat.id)
+            invite_link = chat_info.invite_link or ""
+        except TelegramError:
+            pass
+        await register_group(chat.id, title=chat.title or "", invite_link=invite_link)
+        # Pre-load scam words for this group
+        words = await get_scam_words(group_id=chat.id)
+        context.bot_data[f"scam_{chat.id}"] = words
+        logger.info(f"Registered new group: {chat.id} ({chat.title})")
+
+
 async def refresh_scam_words_job(context: ContextTypes.DEFAULT_TYPE):
+    # Load global/fallback scam words (no group_id filter)
     words = await get_scam_words()
     context.bot_data["scam_words_cache"] = words
-    logger.info(f"Scam words refreshed: {len(words)} words")
+    # Load per-group scam words for all registered groups
+    group_ids = await get_registered_groups()
+    for gid in group_ids:
+        gwords = await get_scam_words(group_id=gid)
+        context.bot_data[f"scam_{gid}"] = gwords
+    logger.info(f"Scam words refreshed: {len(words)} global, {len(group_ids)} groups")
     # Also reload emoji on every refresh cycle
     await emoji_fx.load()
 
@@ -798,7 +839,9 @@ async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def setbadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else None
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     args = context.args
     if not args or len(args) < 2:
@@ -812,7 +855,7 @@ async def setbadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     badge_name = " ".join(name_parts)
     if not badge_name:
         return await update.message.reply_text("❌ Please provide a badge name.")
-    ok = await set_badge_config(count, badge_name, is_admin_level)
+    ok = await set_badge_config(count, badge_name, is_admin_level, group_id=cmd_group_id)
     if ok:
         await update.message.reply_text(f"✅ Badge set: <b>{count}</b> → <b>{h(badge_name)}</b>", parse_mode="HTML")
     else:
@@ -820,7 +863,9 @@ async def setbadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def editbadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else None
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     args = context.args
     if not args or len(args) < 2:
@@ -830,7 +875,7 @@ async def editbadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         return await update.message.reply_text("❌ Count must be a number.")
     new_name = " ".join(args[1:])
-    ok = await set_badge_config(count, new_name)
+    ok = await set_badge_config(count, new_name, group_id=cmd_group_id)
     if ok:
         await update.message.reply_text(f"✅ Badge updated: <b>{count}</b> → <b>{h(new_name)}</b>", parse_mode="HTML")
     else:
@@ -838,7 +883,9 @@ async def editbadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def removebadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else None
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     if not context.args:
         return await update.message.reply_text("Usage: /removebadge <count>")
@@ -846,7 +893,7 @@ async def removebadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = int(context.args[0])
     except ValueError:
         return await update.message.reply_text("❌ Count must be a number.")
-    ok = await remove_badge_config(count)
+    ok = await remove_badge_config(count, group_id=cmd_group_id)
     if ok:
         await update.message.reply_text(f"✅ Badge removed for count <b>{count}</b>.", parse_mode="HTML")
     else:
@@ -855,7 +902,9 @@ async def removebadge(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def settitle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/settitle <referral_count> <title> — set auto group title at referral milestone."""
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else None
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     args = context.args
     if not args or len(args) < 2:
@@ -870,7 +919,7 @@ async def settitle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         return await update.message.reply_text("❌ Count must be a number.")
     title = " ".join(args[1:])[:16]
-    ok = await set_badge_config(count, title, is_admin_level=True)
+    ok = await set_badge_config(count, title, is_admin_level=True, group_id=cmd_group_id)
     if ok:
         await update.message.reply_text(
             decorate(f"✅ Title tier set: <b>{count}</b> referrals → 🏷️ <b>{h(title)}</b>\n\nMembers who reach this milestone will automatically get this group title."),
@@ -882,7 +931,9 @@ async def settitle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def removetitle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/removetitle <referral_count> — remove a title tier."""
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else None
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     if not context.args:
         return await update.message.reply_text("Usage: <code>/removetitle &lt;referral_count&gt;</code>", parse_mode="HTML")
@@ -890,7 +941,7 @@ async def removetitle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = int(context.args[0])
     except ValueError:
         return await update.message.reply_text("❌ Count must be a number.")
-    ok = await remove_badge_config(count)
+    ok = await remove_badge_config(count, group_id=cmd_group_id)
     if ok:
         await update.message.reply_text(f"✅ Title tier removed for <b>{count}</b> referrals.", parse_mode="HTML")
     else:
@@ -935,7 +986,9 @@ async def sell_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update.effective_user.username or "",
         update.effective_user.full_name or "",
     )
-    target = update.effective_message or (update.callback_query and update.callback_query.message)
+    # Store the group_id where the sell was initiated (None for DMs)
+    chat = update.effective_chat
+    context.user_data["sell_group_id"] = chat.id if chat and chat.type != "private" else None
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.message.reply_text(
@@ -1006,11 +1059,13 @@ async def _finalize_sell(update, context, user, file_id):
     price        = context.user_data.get("sell_price", "")
     description  = context.user_data.get("sell_description", "")
     desc_ents    = context.user_data.get("sell_desc_entities", [])
+    sell_group_id = context.user_data.get("sell_group_id")
 
     listing = await create_listing(
         user_id=user.id, username=user.username or "",
         type_="sell", tool_name=tool_name,
         price=price, description=description, file_id=file_id,
+        group_id=sell_group_id,
     )
     if not listing:
         await update.message.reply_text("❌ Failed to create listing. Please try again.")
@@ -1034,11 +1089,14 @@ async def _finalize_sell(update, context, user, file_id):
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "🤝 DM the seller to start a deal!"
     )
+    # Post the listing card to the originating group (if available) or fallback home group
+    post_chat = sell_group_id or GROUP_ID
     try:
-        if file_id:
-            await context.bot.send_photo(chat_id=GROUP_ID, photo=file_id, caption=card, parse_mode="HTML")
-        else:
-            await context.bot.send_message(chat_id=GROUP_ID, text=card, parse_mode="HTML")
+        if post_chat:
+            if file_id:
+                await context.bot.send_photo(chat_id=post_chat, photo=file_id, caption=card, parse_mode="HTML")
+            else:
+                await context.bot.send_message(chat_id=post_chat, text=card, parse_mode="HTML")
         await update.message.reply_text(
             f"✅ Listing posted! ID: #{listing['id']}",
             reply_markup=back_home(),
@@ -1062,6 +1120,9 @@ async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update.effective_user.username or "",
         update.effective_user.full_name or "",
     )
+    # Store the group_id where the buy request was initiated
+    chat = update.effective_chat
+    context.user_data["buy_group_id"] = chat.id if chat and chat.type != "private" else None
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.message.reply_text(
@@ -1110,11 +1171,13 @@ async def _finalize_buy(update, context, requirement, req_ents=None):
     user      = update.effective_user
     tool_name = context.user_data.get("buy_tool_name", "")
     budget    = context.user_data.get("buy_budget", "")
+    buy_group_id = context.user_data.get("buy_group_id")
 
     listing = await create_listing(
         user_id=user.id, username=user.username or "",
         type_="buy", tool_name=tool_name,
         price=budget, description=requirement,
+        group_id=buy_group_id,
     )
     if not listing:
         await update.message.reply_text("❌ Failed to create buy request. Please try again.")
@@ -1136,8 +1199,11 @@ async def _finalize_buy(update, context, requirement, req_ents=None):
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "💬 If you have this tool, DM the buyer!"
     )
+    # Post to originating group or fallback home group
+    post_chat = buy_group_id or GROUP_ID
     try:
-        await context.bot.send_message(chat_id=GROUP_ID, text=card, parse_mode="HTML")
+        if post_chat:
+            await context.bot.send_message(chat_id=post_chat, text=card, parse_mode="HTML")
         await update.message.reply_text(
             f"✅ Buy request posted! ID: #{listing['id']}",
             reply_markup=back_home(),
@@ -1158,6 +1224,9 @@ async def buy_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def search_start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry from 🔍 Search inline button."""
     await update.callback_query.answer()
+    # Store the group context for filtering
+    chat = update.effective_chat
+    context.user_data["search_group_id"] = chat.id if chat and chat.type != "private" else None
     await update.callback_query.message.reply_text(
         decorate("🔍 <b>Search Listings</b>\n\nType a keyword (e.g. ChatGPT, Canva, Adobe):"),
         parse_mode="HTML",
@@ -1167,7 +1236,8 @@ async def search_start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyword = update.message.text.strip()
-    results = await search_listings(keyword)
+    search_group_id = context.user_data.get("search_group_id")
+    results = await search_listings(keyword, group_id=search_group_id)
     if not results:
         await update.message.reply_text(
             f"🔍 No listings found for <b>'{h(keyword)}'</b>.",
@@ -1207,7 +1277,9 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await update.message.reply_text("Usage: /search <keyword>")
     keyword = " ".join(context.args)
-    results = await search_listings(keyword)
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else None
+    results = await search_listings(keyword, group_id=cmd_group_id)
     if not results:
         return await update.message.reply_text(f"🔍 No listings found for '{keyword}'.")
     rows = []
@@ -1272,13 +1344,17 @@ async def delist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else GROUP_ID
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
         return await update.message.reply_text("Usage: /ban @username or reply to a message")
+    if not cmd_group_id:
+        return await update.message.reply_text("❌ This command must be used in a group.")
     try:
-        await context.bot.ban_chat_member(chat_id=GROUP_ID, user_id=target_id)
+        await context.bot.ban_chat_member(chat_id=cmd_group_id, user_id=target_id)
         await update.message.reply_text(f"🔨 {target_name} has been banned!")
         await update_member(target_id, is_banned=True)
     except TelegramError as e:
@@ -1286,11 +1362,15 @@ async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else GROUP_ID
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
         return await update.message.reply_text("Usage: /mute @username <minutes>")
+    if not cmd_group_id:
+        return await update.message.reply_text("❌ This command must be used in a group.")
     minutes = 10
     for arg in (context.args or []):
         if arg.isdigit():
@@ -1299,7 +1379,7 @@ async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
     try:
         await context.bot.restrict_chat_member(
-            chat_id=GROUP_ID, user_id=target_id, permissions=MUTED, until_date=until,
+            chat_id=cmd_group_id, user_id=target_id, permissions=MUTED, until_date=until,
         )
         await update.message.reply_text(f"🔇 {target_name} muted for {minutes} minutes!")
     except TelegramError as e:
@@ -1307,7 +1387,9 @@ async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else GROUP_ID
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
@@ -1317,12 +1399,15 @@ async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_count = await add_warning(target_id)
 
     if new_count >= WARNING_LIMIT:
-        try:
-            await context.bot.ban_chat_member(chat_id=GROUP_ID, user_id=target_id)
-            await update_member(target_id, is_banned=True)
-            await update.message.reply_text(f"⚠️ {target_name} reached {new_count} warnings — auto-banned! 🔨")
-        except TelegramError as e:
-            await update.message.reply_text(f"❌ Auto-ban error: {e}")
+        if cmd_group_id:
+            try:
+                await context.bot.ban_chat_member(chat_id=cmd_group_id, user_id=target_id)
+                await update_member(target_id, is_banned=True)
+                await update.message.reply_text(f"⚠️ {target_name} reached {new_count} warnings — auto-banned! 🔨")
+            except TelegramError as e:
+                await update.message.reply_text(f"❌ Auto-ban error: {e}")
+        else:
+            await update.message.reply_text(f"⚠️ {target_name} reached {new_count} warnings — please ban manually.")
     else:
         await update.message.reply_text(f"⚠️ Warning issued to {target_name}! ({new_count}/{WARNING_LIMIT})")
         try:
@@ -1335,7 +1420,9 @@ async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def warnings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else None
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
@@ -1345,7 +1432,9 @@ async def warnings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else None
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     stats = await get_group_stats()
     await edit_or_reply(
@@ -1362,37 +1451,49 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def addword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else None
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     if not context.args:
         return await update.message.reply_text("Usage: /addword <word>")
     word = " ".join(context.args).lower()
-    ok   = await add_scam_word(word, update.effective_user.id)
+    ok   = await add_scam_word(word, update.effective_user.id, group_id=cmd_group_id)
     if ok:
-        words = await get_scam_words()
-        context.bot_data["scam_words_cache"] = words
+        words = await get_scam_words(group_id=cmd_group_id)
+        if cmd_group_id:
+            context.bot_data[f"scam_{cmd_group_id}"] = words
+        else:
+            context.bot_data["scam_words_cache"] = words
         await update.message.reply_text(f"✅ Scam word added: '{word}'")
     else:
         await update.message.reply_text(f"⚠️ Word already exists or error: '{word}'")
 
 
 async def removeword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else None
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     if not context.args:
         return await update.message.reply_text("Usage: /removeword <word>")
     word = " ".join(context.args).lower()
-    ok   = await remove_scam_word(word)
+    ok   = await remove_scam_word(word, group_id=cmd_group_id)
     if ok:
-        words = await get_scam_words()
-        context.bot_data["scam_words_cache"] = words
+        words = await get_scam_words(group_id=cmd_group_id)
+        if cmd_group_id:
+            context.bot_data[f"scam_{cmd_group_id}"] = words
+        else:
+            context.bot_data["scam_words_cache"] = words
         await update.message.reply_text(f"✅ Scam word removed: '{word}'")
     else:
         await update.message.reply_text(f"❌ Word not found: '{word}'")
 
 
 async def announce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else None
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
 
     reply = update.message.reply_to_message
@@ -1435,16 +1536,22 @@ async def announce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def sellercard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else GROUP_ID
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
         return await update.message.reply_text("Usage: /sellercard @username or reply to a message")
-    await post_seller_card(context.bot, target_id, GROUP_ID)
+    if not cmd_group_id:
+        return await update.message.reply_text("❌ Run this command in a group.")
+    await post_seller_card(context.bot, target_id, cmd_group_id)
 
 
 async def admin_panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else None
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     await update.message.reply_text(
         decorate("⚙️ <b>Admin Panel</b>"),
@@ -1469,20 +1576,21 @@ async def daily_morning_post(context: ContextTypes.DEFAULT_TYPE):
             store.pop(k, None)
     context.bot_data.pop("deal_acceptances", None)  # rebuild from DB on next accept
     sell_count, buy_count = await get_active_listing_counts()
-    try:
-        await context.bot.send_message(
-            chat_id=GROUP_ID,
-            text=decorate(
-                "🌅 <b>Good Morning, Trusted Seller Community!</b> ☀️\n\n"
-                f"Today's active listings:\n"
-                f"🔥 Sell: {sell_count}\n"
-                f"🛍️ Buy: {buy_count}\n\n"
-                "🚀 Find amazing deals today!"
-            ),
-            parse_mode="HTML",
-        )
-    except TelegramError as e:
-        logger.error(f"Morning post error: {e}")
+    if GROUP_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=GROUP_ID,
+                text=decorate(
+                    "🌅 <b>Good Morning, Trusted Seller Community!</b> ☀️\n\n"
+                    f"Today's active listings:\n"
+                    f"🔥 Sell: {sell_count}\n"
+                    f"🛍️ Buy: {buy_count}\n\n"
+                    "🚀 Find amazing deals today!"
+                ),
+                parse_mode="HTML",
+            )
+        except TelegramError as e:
+            logger.error(f"Morning post error: {e}")
 
 
 async def weekly_leaderboard_post(context: ContextTypes.DEFAULT_TYPE):
@@ -1503,14 +1611,15 @@ async def weekly_leaderboard_post(context: ContextTypes.DEFAULT_TYPE):
         rating   = m.get("avg_rating", 0)
         lines.append(f"{i}. {h(uname)} {verified} — ⭐ {rating}/5")
 
-    try:
-        await context.bot.send_message(
-            chat_id=GROUP_ID,
-            text=decorate("\n".join(lines)),
-            parse_mode="HTML",
-        )
-    except TelegramError as e:
-        logger.error(f"Weekly leaderboard error: {e}")
+    if GROUP_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=GROUP_ID,
+                text=decorate("\n".join(lines)),
+                parse_mode="HTML",
+            )
+        except TelegramError as e:
+            logger.error(f"Weekly leaderboard error: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1552,7 +1661,7 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     admin = query.from_user
 
-    if admin.id not in ADMIN_IDS and not await is_admin(admin.id, context):
+    if admin.id not in SUPERADMIN_IDS and not await is_admin(admin.id, context):
         await query.answer("Admins only!", show_alert=True)
         return
 
@@ -1566,7 +1675,7 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "approve":
         ok = await set_verified(target_user_id, admin.id)
         if ok:
-            await _set_member_title(context.bot, target_user_id, "Trusted Seller")
+            await _set_member_title(context.bot, target_user_id, "Trusted Seller", group_id=GROUP_ID)
             member = await get_member(target_user_id) or {}
             uname  = member.get("username") or member.get("full_name") or str(target_user_id)
             uname_display = f"@{uname}" if member.get("username") else uname
@@ -1576,11 +1685,12 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=decorate("🎉 Congratulations! You are now a <b>Verified Seller</b>! ✅\n🏷️ Your group title has been set to <b>Trusted Seller</b>."),
                     parse_mode="HTML",
                 )
-                await context.bot.send_message(
-                    chat_id=GROUP_ID,
-                    text=decorate(f"🎊 <b>{h(uname_display)}</b> is now a <b>Verified Seller</b>! ✅\nWelcome to the trusted community!"),
-                    parse_mode="HTML",
-                )
+                if GROUP_ID:
+                    await context.bot.send_message(
+                        chat_id=GROUP_ID,
+                        text=decorate(f"🎊 <b>{h(uname_display)}</b> is now a <b>Verified Seller</b>! ✅\nWelcome to the trusted community!"),
+                        parse_mode="HTML",
+                    )
             except TelegramError:
                 pass
             await query.answer("✅ Verified!", show_alert=False)
@@ -1615,21 +1725,24 @@ async def verified_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else GROUP_ID
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
         return await update.message.reply_text("Usage: /approve @username or reply to a message")
     ok = await set_verified(target_id, update.effective_user.id)
     if ok:
-        await _set_member_title(context.bot, target_id, "Trusted Seller")
+        await _set_member_title(context.bot, target_id, "Trusted Seller", group_id=cmd_group_id)
         try:
             await context.bot.send_message(
                 chat_id=target_id,
                 text=decorate("🎉 You are now a <b>Verified Seller</b>! ✅\n🏷️ Your group title has been set to <b>Trusted Seller</b>."),
                 parse_mode="HTML",
             )
-            await context.bot.send_message(chat_id=GROUP_ID, text=decorate(f"🎊 <b>{h(target_name)}</b> is now a Verified Seller! ✅"), parse_mode="HTML")
+            if cmd_group_id:
+                await context.bot.send_message(chat_id=cmd_group_id, text=decorate(f"🎊 <b>{h(target_name)}</b> is now a Verified Seller! ✅"), parse_mode="HTML")
         except TelegramError:
             pass
         await update.message.reply_text(f"✅ {target_name} verified and titled!")
@@ -1638,7 +1751,9 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def unverify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else GROUP_ID
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
@@ -1649,7 +1764,7 @@ async def unverify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not member.get("is_verified"):
         return await update.message.reply_text(f"⚠️ {target_name} is not verified.")
     await update_member(target_id, is_verified=False)
-    await _remove_member_title(context.bot, target_id)
+    await _remove_member_title(context.bot, target_id, group_id=cmd_group_id)
     try:
         await context.bot.send_message(
             chat_id=target_id,
@@ -1662,7 +1777,9 @@ async def unverify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id, context):
+    chat = update.effective_chat
+    cmd_group_id = chat.id if chat and chat.type != "private" else None
+    if not await is_admin(update.effective_user.id, context, chat_id=cmd_group_id):
         return await update.message.reply_text("❌ Admins only.")
     target_id, target_name = await resolve_target_user(update, context)
     if not target_id:
@@ -2008,20 +2125,21 @@ async def deal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if deal["buyer_id"] in acceptances and deal["seller_id"] in acceptances:
         await update_deal(deal_id, status="active")
         context.bot_data["deal_acceptances"].pop(deal_id, None)
-        try:
-            await context.bot.send_message(
-                chat_id=GROUP_ID,
-                text=decorate(
-                    f"🤝 <b>Deal is Now Active!</b>\n\n"
-                    f"🆔 Deal ID: #{deal_id}\n"
-                    f"🛒 Tool: {h(deal['tool_name'])}\n"
-                    f"💰 Amount: {deal['amount']}\n\n"
-                    "Both parties agreed. Good luck! 🚀"
-                ),
-                parse_mode="HTML",
-            )
-        except TelegramError:
-            pass
+        if GROUP_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=GROUP_ID,
+                    text=decorate(
+                        f"🤝 <b>Deal is Now Active!</b>\n\n"
+                        f"🆔 Deal ID: #{deal_id}\n"
+                        f"🛒 Tool: {h(deal['tool_name'])}\n"
+                        f"💰 Amount: {deal['amount']}\n\n"
+                        "Both parties agreed. Good luck! 🚀"
+                    ),
+                    parse_mode="HTML",
+                )
+            except TelegramError:
+                pass
         for uid in [deal["buyer_id"], deal["seller_id"]]:
             try:
                 await context.bot.send_message(
@@ -2096,22 +2214,24 @@ async def dealcomplete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except TelegramError:
                 pass
 
-        await post_seller_card(context.bot, deal["seller_id"], GROUP_ID)
+        if GROUP_ID:
+            await post_seller_card(context.bot, deal["seller_id"], GROUP_ID)
 
-        try:
-            await context.bot.send_message(
-                chat_id=GROUP_ID,
-                text=decorate(
-                    f"✅ <b>Deal Completed!</b>\n\n"
-                    f"🆔 Deal ID: #{deal_id}\n"
-                    f"🛒 Tool: {h(deal['tool_name'])}\n"
-                    f"💰 Amount: {deal['amount']}\n\n"
-                    "🎊 Congratulations to both parties!"
-                ),
-                parse_mode="HTML",
-            )
-        except TelegramError:
-            pass
+        if GROUP_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=GROUP_ID,
+                    text=decorate(
+                        f"✅ <b>Deal Completed!</b>\n\n"
+                        f"🆔 Deal ID: #{deal_id}\n"
+                        f"🛒 Tool: {h(deal['tool_name'])}\n"
+                        f"💰 Amount: {deal['amount']}\n\n"
+                        "🎊 Congratulations to both parties!"
+                    ),
+                    parse_mode="HTML",
+                )
+            except TelegramError:
+                pass
 
 
 async def mydeals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2187,7 +2307,8 @@ async def deal_action_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             seller    = await get_member(deal["seller_id"])
             new_total = (seller.get("total_deals", 0) if seller else 0) + 1
             await update_member(deal["seller_id"], total_deals=new_total)
-            await post_seller_card(context.bot, deal["seller_id"], GROUP_ID)
+            if GROUP_ID:
+                await post_seller_card(context.bot, deal["seller_id"], GROUP_ID)
 
     elif action == "cancel":
         if deal["status"] in ["completed", "cancelled"]:
@@ -2387,9 +2508,18 @@ async def mycard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🙏 <b>If you've dealt with me, please give a trust vote!</b>"
     )
 
+    # Post to the group where the command was used, or fallback to home group
+    card_chat = update.effective_chat
+    card_group_id = (card_chat.id if card_chat and card_chat.type != "private" else None) or GROUP_ID
+    if not card_group_id:
+        return await edit_or_reply(
+            update,
+            "❌ Cannot post card — no group configured. Use this command in a group.",
+            reply_markup=back_home(),
+        )
     try:
         await context.bot.send_message(
-            chat_id=GROUP_ID,
+            chat_id=card_group_id,
             text=text,
             parse_mode="HTML",
             reply_markup=trust_profile_kb(user.id),
@@ -2700,10 +2830,12 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif data == "adm:scamwords":
-            if not await is_admin(query.from_user.id, context):
+            _sw_chat = query.message.chat if query.message else None
+            _sw_gid  = _sw_chat.id if _sw_chat and _sw_chat.type in ("group", "supergroup") else None
+            if not await is_admin(query.from_user.id, context, chat_id=_sw_gid):
                 await query.answer("Admins only!", show_alert=True)
                 return
-            words     = context.bot_data.get("scam_words_cache", [])
+            words     = context.bot_data.get(f"scam_{_sw_gid}" if _sw_gid else "scam_words_cache", context.bot_data.get("scam_words_cache", []))
             word_list = ", ".join(words) if words else "None added yet"
             await edit_or_reply(
                 update,
@@ -2777,10 +2909,12 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif data == "adm:titles":
-            if not await is_admin(query.from_user.id, context):
+            _tt_chat = query.message.chat if query.message else None
+            _tt_gid  = _tt_chat.id if _tt_chat and _tt_chat.type in ("group", "supergroup") else None
+            if not await is_admin(query.from_user.id, context, chat_id=_tt_gid):
                 await query.answer("Admins only!", show_alert=True)
                 return
-            all_badges = await get_all_badges()
+            all_badges = await get_all_badges(group_id=_tt_gid)
             title_tiers = [b for b in all_badges if b.get("is_admin_level")]
             if title_tiers:
                 lines = ["🏷️ <b>Auto Title Tiers</b>\n"]
@@ -2926,7 +3060,14 @@ def main():
 
     async def _post_init(app: Application) -> None:
         await emoji_fx.load()
+        # Load global scam words cache (no group filter — fallback)
         app.bot_data["scam_words_cache"] = await get_scam_words()
+        # Load per-group scam words for all already-registered groups
+        group_ids = await get_registered_groups()
+        for gid in group_ids:
+            gwords = await get_scam_words(group_id=gid)
+            app.bot_data[f"scam_{gid}"] = gwords
+        logger.info(f"Startup: loaded scam words for {len(group_ids)} registered groups")
 
     application = ApplicationBuilder().token(BOT_TOKEN).post_init(_post_init).build()
 
@@ -3002,6 +3143,7 @@ def main():
     # ── Register handlers ─────────────────────────────────────────────────
 
     application.add_handler(ChatMemberHandler(chat_member_updated, ChatMemberHandler.CHAT_MEMBER))
+    application.add_handler(ChatMemberHandler(my_chat_member_handler, ChatMemberHandler.MY_CHAT_MEMBER))
 
     # Conversations (must be before generic callback handler)
     application.add_handler(sell_conv)
@@ -3078,16 +3220,11 @@ def main():
         emoji_capture_handler,
     ), group=-1)
 
-    # Group message filters
-    application.add_handler(MessageHandler(
-        filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND, anti_flood_filter,
-    ))
-    application.add_handler(MessageHandler(
-        filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND, link_filter,
-    ))
-    application.add_handler(MessageHandler(
-        filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND, scam_word_filter,
-    ))
+    # Group message filters — work in any group the bot is in
+    _group_filter = filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND
+    application.add_handler(MessageHandler(_group_filter, anti_flood_filter))
+    application.add_handler(MessageHandler(_group_filter, link_filter))
+    application.add_handler(MessageHandler(_group_filter, scam_word_filter))
 
     setup_jobs(application)
 
