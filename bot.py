@@ -1,5 +1,7 @@
 import asyncio
+import json as _json
 import logging
+import os as _os
 import random
 import re
 import time
@@ -95,6 +97,10 @@ from db import (
     get_gemini_stats,
     get_unclaimed_links,
     set_link_claimed,
+    update_link_check_status,
+    get_links_for_check,
+    get_setting,
+    set_setting,
 )
 from keyboards import (
     main_menu,
@@ -3119,6 +3125,8 @@ async def setstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Conversation state for /addlinks
 ADDLINKS_WAIT = 90
+# Conversation state for /setcookie
+SETCOOKIE_WAIT = 91
 
 
 async def addlinks_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3229,6 +3237,245 @@ async def unclaimlink_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Link #{link_id} marked as <b>unclaimed</b>.", parse_mode="HTML")
     else:
         await update.message.reply_text(f"❌ Link #{link_id} not found.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GOOGLE COOKIE STORAGE  (for Playwright link-checker)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_COOKIE_SETTING_KEY = "google_cookies"
+_cookie_cache: list = []   # in-memory cache to avoid repeated DB reads
+
+
+async def _load_cookies() -> list:
+    """Load Playwright-format cookies from Supabase (persistent across deploys)."""
+    global _cookie_cache
+    if _cookie_cache:
+        return _cookie_cache
+    raw = await get_setting(_COOKIE_SETTING_KEY)
+    if raw:
+        try:
+            _cookie_cache = _json.loads(raw)
+            return _cookie_cache
+        except Exception:
+            pass
+    return []
+
+
+async def _save_cookies(cookies: list) -> bool:
+    """Persist cookies to Supabase so they survive Railway redeploys."""
+    global _cookie_cache
+    ok = await set_setting(_COOKIE_SETTING_KEY, _json.dumps(cookies))
+    if ok:
+        _cookie_cache = cookies
+    return ok
+
+
+def _normalize_cookies(raw: list) -> list:
+    """Convert Cookie-Editor JSON export → Playwright add_cookies() format."""
+    _ss_map = {
+        "no_restriction": "None",
+        "lax":            "Lax",
+        "strict":         "Strict",
+        "unspecified":    "None",
+        "none":           "None",
+    }
+    out = []
+    for c in raw:
+        name  = c.get("name",  "")
+        value = c.get("value", "")
+        if not name:
+            continue
+        entry = {
+            "name":     name,
+            "value":    value,
+            "domain":   c.get("domain", ".google.com"),
+            "path":     c.get("path",   "/"),
+            "httpOnly": bool(c.get("httpOnly", False)),
+            "secure":   bool(c.get("secure",   True)),
+            "sameSite": _ss_map.get((c.get("sameSite") or "").lower(), "None"),
+        }
+        out.append(entry)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /setcookie  — admin saves Google account cookies for link-checking
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def setcookie_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setcookie — admin pastes exported Google account cookies."""
+    if not await is_admin(update.effective_user.id, context):
+        return await update.message.reply_text("❌ Admins only.")
+
+    existing = await _load_cookies()
+    note = f"\n\n<i>Currently {len(existing)} cookies saved.</i>" if existing else ""
+
+    await update.message.reply_text(
+        "🍪 <b>Google Cookie Setup</b>\n\n"
+        "<b>Step 1</b> — Open Chrome and visit <code>google.com</code>\n"
+        "<b>Step 2</b> — Sign in to a Google account\n"
+        "<b>Step 3</b> — Install the <b>Cookie-Editor</b> extension\n"
+        "<b>Step 4</b> — Click Cookie-Editor icon → <b>Export</b> → <b>Export as JSON</b>\n"
+        "<b>Step 5</b> — Paste the full JSON here\n\n"
+        "⚠️ Use a <b>secondary / burner</b> Google account, not your main one."
+        + note +
+        "\n\n<i>Send /cancel to abort.</i>",
+        parse_mode="HTML",
+    )
+    return SETCOOKIE_WAIT
+
+
+async def setcookie_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive, validate and save pasted cookie JSON."""
+    text = (update.message.text or "").strip()
+    try:
+        raw = _json.loads(text)
+        if not isinstance(raw, list) or len(raw) == 0:
+            raise ValueError("Expected a non-empty JSON array.")
+        cookies = _normalize_cookies(raw)
+        if not cookies:
+            raise ValueError("No cookies with a 'name' field found in the JSON.")
+
+        await _save_cookies(cookies)
+        await update.message.reply_text(
+            f"✅ <b>{len(cookies)} cookies saved!</b>\n\n"
+            "Run /checklinks to start auto-checking your Gemini links.\n"
+            "Run /setcookie again whenever cookies expire.",
+            parse_mode="HTML",
+        )
+    except (_json.JSONDecodeError, ValueError) as exc:
+        await update.message.reply_text(
+            f"❌ Invalid input: <code>{exc}</code>\n\n"
+            "Make sure you paste the full JSON array from Cookie-Editor.\n"
+            "Try again or send /cancel.",
+            parse_mode="HTML",
+        )
+        return SETCOOKIE_WAIT
+
+    return ConversationHandler.END
+
+
+async def setcookie_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Cookie setup cancelled.")
+    return ConversationHandler.END
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /checklinks — auto-check all unclaimed links with Playwright
+# ─────────────────────────────────────────────────────────────────────────────
+
+_check_running = False   # simple mutex — only one check at a time
+
+
+async def checklinks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/checklinks — run Playwright check on all unclaimed Gemini links."""
+    global _check_running
+    if not await is_admin(update.effective_user.id, context):
+        return await update.message.reply_text("❌ Admins only.")
+
+    if _check_running:
+        return await update.message.reply_text(
+            "⚠️ A link check is already in progress. Please wait."
+        )
+
+    cookies = await _load_cookies()
+    if not cookies:
+        return await update.message.reply_text(
+            "❌ No Google cookies saved.\n"
+            "Run /setcookie first, then try again.",
+            parse_mode="HTML",
+        )
+
+    links = await get_links_for_check(limit=500)
+    if not links:
+        return await update.message.reply_text("✅ No unclaimed links to check!")
+
+    eta_min = max(1, len(links) * 2 // 60)
+    status_msg = await update.message.reply_text(
+        f"🔍 Starting check on <b>{len(links)}</b> unclaimed links...\n"
+        f"⏳ Estimated time: ~{eta_min} minute(s).\n"
+        f"I'll update every 30 seconds.",
+        parse_mode="HTML",
+    )
+
+    _check_running = True
+    try:
+        from link_checker import check_links_batch
+
+        counts: dict = {
+            "unclaimed":     0,
+            "claimed":       0,
+            "invalid":       0,
+            "error":         0,
+            "cookie_expired": 0,
+        }
+        last_edit = [time.time()]   # list so closure can mutate it
+
+        async def _progress(done: int, total: int, link_id: int, status: str) -> None:
+            counts[status] = counts.get(status, 0) + 1
+
+            # Persist result to DB
+            now_iso = datetime.now(timezone.utc).isoformat()
+            await update_link_check_status(link_id, status, now_iso)
+
+            # Auto-mark confirmed claimed links in is_claimed column
+            if status == "claimed":
+                await set_link_claimed(link_id, True)
+
+            # Update Telegram message every 30 s
+            if time.time() - last_edit[0] >= 30:
+                try:
+                    await status_msg.edit_text(
+                        f"🔍 Checking... <b>{done}/{total}</b>\n\n"
+                        f"✅ Unclaimed: <b>{counts['unclaimed']}</b>\n"
+                        f"❌ Claimed:   <b>{counts['claimed']}</b>\n"
+                        f"🗑 Invalid:   <b>{counts['invalid']}</b>\n"
+                        f"⚠️ Error:     <b>{counts['error']}</b>",
+                        parse_mode="HTML",
+                    )
+                    last_edit[0] = time.time()
+                except Exception:
+                    pass
+
+        results = await check_links_batch(
+            links, cookies, delay=1.5, progress_callback=_progress
+        )
+
+        # Pull fresh totals from DB for final report
+        stats = await get_gemini_stats()
+
+        await status_msg.edit_text(
+            "✅ <b>Link Check Complete!</b>\n\n"
+            f"🔍 Checked: <b>{len(results)}</b> links\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Unclaimed:      <b>{counts['unclaimed']}</b>\n"
+            f"❌ Claimed (auto): <b>{counts['claimed']}</b>\n"
+            f"🗑 Invalid:        <b>{counts['invalid']}</b>\n"
+            f"⚠️ Error:          <b>{counts['error']}</b>\n"
+            f"🍪 Cookie expired: <b>{counts['cookie_expired']}</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"📦 DB Total:    <b>{stats['total']}</b>\n"
+            f"✅ DB Unclaimed: <b>{stats['unclaimed']}</b>\n"
+            f"❌ DB Claimed:   <b>{stats['claimed']}</b>",
+            parse_mode="HTML",
+        )
+
+        if counts.get("cookie_expired", 0) > 0:
+            await update.message.reply_text(
+                "⚠️ <b>Google cookies have expired!</b>\n"
+                "Run /setcookie again with fresh cookies and re-run /checklinks.",
+                parse_mode="HTML",
+            )
+
+    except Exception as exc:
+        logger.error("checklinks_cmd error: %s", exc)
+        await status_msg.edit_text(
+            f"❌ Check failed:\n<code>{exc}</code>",
+            parse_mode="HTML",
+        )
+    finally:
+        _check_running = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3361,6 +3608,16 @@ def main():
     )
     application.add_handler(addlinks_conv)
 
+    setcookie_conv = ConversationHandler(
+        entry_points=[CommandHandler("setcookie", setcookie_start)],
+        states={
+            SETCOOKIE_WAIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, setcookie_receive)],
+        },
+        fallbacks=[CommandHandler("cancel", setcookie_cancel)],
+        conversation_timeout=10 * 60,
+    )
+    application.add_handler(setcookie_conv)
+
     # Callback queries
     application.add_handler(CallbackQueryHandler(captcha_callback,      pattern=r"^captcha_"))
     application.add_handler(CallbackQueryHandler(verify_callback,       pattern=r"^verify_"))
@@ -3421,6 +3678,7 @@ def main():
     application.add_handler(CommandHandler("unclaimed",   unclaimed_cmd))
     application.add_handler(CommandHandler("claimlink",   claimlink_cmd))
     application.add_handler(CommandHandler("unclaimlink", unclaimlink_cmd))
+    application.add_handler(CommandHandler("checklinks",  checklinks_cmd))
 
     # Global /cancel — fires only when NOT inside a ConversationHandler (group=1)
     async def _global_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):

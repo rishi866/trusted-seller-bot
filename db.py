@@ -888,3 +888,73 @@ async def set_link_claimed(link_id: int, is_claimed: bool) -> bool:
     except Exception as e:
         logger.error(f"set_link_claimed error: {e}")
         return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BOT SETTINGS  (key-value store — used for cookie persistence on Railway)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def get_setting(key: str) -> Optional[str]:
+    """Return value for a bot setting key, or None if not set."""
+    def _get():
+        res = get_supabase().table("bot_settings").select("value").eq("key", key).limit(1).execute()
+        return res.data[0]["value"] if res.data else None
+    try:
+        return await asyncio.to_thread(_get)
+    except Exception as e:
+        logger.error(f"get_setting({key}) error: {e}")
+        return None
+
+
+async def set_setting(key: str, value: str) -> bool:
+    """Upsert a bot setting key-value pair."""
+    def _set():
+        get_supabase().table("bot_settings").upsert({
+            "key":        key,
+            "value":      value,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
+        return True
+    try:
+        return await asyncio.to_thread(_set)
+    except Exception as e:
+        logger.error(f"set_setting({key}) error: {e}")
+        return False
+
+
+async def update_link_check_status(link_id: int, status: str, checked_at: str) -> bool:
+    """Update the auto-check status and timestamp for a single link."""
+    def _upd():
+        get_supabase().table("gemini_links").update({
+            "check_status":    status,
+            "last_checked_at": checked_at,
+        }).eq("id", link_id).execute()
+        return True
+    try:
+        return await asyncio.to_thread(_upd)
+    except Exception as e:
+        logger.error(f"update_link_check_status error: {e}")
+        return False
+
+
+async def get_links_for_check(limit: int = 500) -> list:
+    """
+    Return unclaimed links ordered by last_checked_at ASC (nulls first).
+    These are prioritised for the next auto-check run.
+    """
+    def _get():
+        res = (
+            get_supabase()
+            .table("gemini_links")
+            .select("id, link")
+            .eq("is_claimed", False)
+            .order("last_checked_at", desc=False)
+            .limit(limit)
+            .execute()
+        )
+        return res.data or []
+    try:
+        return await asyncio.to_thread(_get)
+    except Exception as e:
+        logger.error(f"get_links_for_check error: {e}")
+        return []
