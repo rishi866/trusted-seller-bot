@@ -3304,7 +3304,7 @@ def _normalize_cookies(raw: list) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def setcookie_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/setcookie — admin pastes exported Google account cookies."""
+    """/setcookie — admin uploads or pastes exported Google account cookies."""
     if not await is_admin(update.effective_user.id, context):
         return await update.message.reply_text("❌ Admins only.")
 
@@ -3313,12 +3313,12 @@ async def setcookie_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🍪 <b>Google Cookie Setup</b>\n\n"
-        "<b>Step 1</b> — Open Chrome and visit <code>google.com</code>\n"
-        "<b>Step 2</b> — Sign in to a Google account\n"
-        "<b>Step 3</b> — Install the <b>Cookie-Editor</b> extension\n"
-        "<b>Step 4</b> — Click Cookie-Editor icon → <b>Export</b> → <b>Export as JSON</b>\n"
-        "<b>Step 5</b> — Paste the full JSON here\n\n"
-        "⚠️ Use a <b>secondary / burner</b> Google account, not your main one."
+        "<b>Step 1</b> — Open Chrome → <code>google.com</code> (sign in hona chahiye)\n"
+        "<b>Step 2</b> — Cookie-Editor extension open karo\n"
+        "<b>Step 3</b> — <b>Export → Export as JSON</b> click karo\n"
+        "<b>Step 4</b> — Copied JSON ko Notepad me paste karo → <b>.txt file save karo</b>\n"
+        "<b>Step 5</b> — Woh <b>.txt file yahan bhejo</b> (as attachment/document)\n\n"
+        "⚠️ File as document bhejo, text paste mat karo (Telegram limit ki wajah se split ho jata hai)."
         + note +
         "\n\n<i>Send /cancel to abort.</i>",
         parse_mode="HTML",
@@ -3326,17 +3326,45 @@ async def setcookie_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SETCOOKIE_WAIT
 
 
-async def setcookie_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive, validate and save pasted cookie JSON."""
-    text = (update.message.text or "").strip()
-    try:
-        raw = _json.loads(text)
-        if not isinstance(raw, list) or len(raw) == 0:
-            raise ValueError("Expected a non-empty JSON array.")
-        cookies = _normalize_cookies(raw)
-        if not cookies:
-            raise ValueError("No cookies with a 'name' field found in the JSON.")
+async def _parse_cookie_json(text: str) -> list:
+    """Parse, validate and normalise cookie JSON. Raises ValueError on bad input."""
+    raw = _json.loads(text)
+    if not isinstance(raw, list) or len(raw) == 0:
+        raise ValueError("Expected a non-empty JSON array.")
+    cookies = _normalize_cookies(raw)
+    if not cookies:
+        raise ValueError("No valid cookies found in the JSON.")
+    return cookies
 
+
+async def setcookie_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive cookie JSON — as a .txt/.json file (preferred) or plain text."""
+    text = None
+
+    # ── File / document upload ────────────────────────────────────────────────
+    if update.message.document:
+        doc = update.message.document
+        if doc.file_size and doc.file_size > 200_000:   # 200 KB sanity limit
+            await update.message.reply_text("❌ File too large. Please send the Cookie-Editor JSON file only.")
+            return SETCOOKIE_WAIT
+        try:
+            file = await doc.get_file()
+            data = await file.download_as_bytearray()
+            text = data.decode("utf-8", errors="replace").strip()
+        except Exception as exc:
+            await update.message.reply_text(f"❌ Could not read file: {exc}\nTry again or /cancel.")
+            return SETCOOKIE_WAIT
+
+    # ── Plain text fallback ───────────────────────────────────────────────────
+    elif update.message.text:
+        text = update.message.text.strip()
+
+    if not text:
+        await update.message.reply_text("❌ Please send the JSON as a .txt file or plain text.")
+        return SETCOOKIE_WAIT
+
+    try:
+        cookies = await _parse_cookie_json(text)
         await _save_cookies(cookies)
         await update.message.reply_text(
             f"✅ <b>{len(cookies)} cookies saved!</b>\n\n"
@@ -3346,8 +3374,8 @@ async def setcookie_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except (_json.JSONDecodeError, ValueError) as exc:
         await update.message.reply_text(
-            f"❌ Invalid input: <code>{exc}</code>\n\n"
-            "Make sure you paste the full JSON array from Cookie-Editor.\n"
+            f"❌ Invalid JSON: <code>{exc}</code>\n\n"
+            "Export from Cookie-Editor → save as .txt → send that file here.\n"
             "Try again or send /cancel.",
             parse_mode="HTML",
         )
@@ -3611,7 +3639,10 @@ def main():
     setcookie_conv = ConversationHandler(
         entry_points=[CommandHandler("setcookie", setcookie_start)],
         states={
-            SETCOOKIE_WAIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, setcookie_receive)],
+            SETCOOKIE_WAIT: [
+                MessageHandler(filters.Document.ALL, setcookie_receive),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, setcookie_receive),
+            ],
         },
         fallbacks=[CommandHandler("cancel", setcookie_cancel)],
         conversation_timeout=10 * 60,
