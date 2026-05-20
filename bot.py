@@ -3178,8 +3178,19 @@ async def addlinks_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ADDLINKS_WAIT
 
     await update.message.reply_text(f"⏳ Processing <b>{len(links)}</b> links...", parse_mode="HTML")
-    added, dupes = await add_gemini_links(links, update.effective_user.id)
+    added, dupes, last_err = await add_gemini_links(links, update.effective_user.id)
     stats = await get_gemini_stats()
+
+    # Show real error if nothing was added
+    if added == 0 and last_err:
+        await update.message.reply_text(
+            f"❌ <b>DB Error — koi link add nahi hua!</b>\n\n"
+            f"<code>{last_err[:500]}</code>\n\n"
+            "Supabase me <b>gemini_links</b> table check karo aur RLS disable hai ya nahi dekho.",
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
     await update.message.reply_text(
         decorate(
             f"✅ <b>Links Uploaded!</b>\n\n"

@@ -821,12 +821,13 @@ async def get_verified_sellers() -> list:
 # GEMINI LINK MANAGER
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def add_gemini_links(links: list[str], added_by: int) -> tuple[int, int]:
-    """Bulk insert links. Returns (added_count, duplicate_count)."""
+async def add_gemini_links(links: list[str], added_by: int) -> tuple[int, int, str]:
+    """Bulk insert links. Returns (added_count, duplicate_count, last_error)."""
     def _add():
         supabase  = get_supabase()
         added     = 0
         duplicate = 0
+        last_err  = ""
         for link in links:
             link = link.strip()
             if not link:
@@ -837,14 +838,22 @@ async def add_gemini_links(links: list[str], added_by: int) -> tuple[int, int]:
                     "added_by": added_by,
                 }).execute()
                 added += 1
-            except Exception:
-                duplicate += 1
-        return added, duplicate
+            except Exception as e:
+                err_str = str(e).lower()
+                # Only count as duplicate if it's a unique/conflict error
+                if "unique" in err_str or "duplicate" in err_str or "conflict" in err_str or "23505" in err_str:
+                    duplicate += 1
+                else:
+                    # Real error — log it and stop
+                    last_err = str(e)
+                    logger.error(f"add_gemini_links insert error: {e}")
+                    duplicate += 1   # still count remaining as failed
+        return added, duplicate, last_err
     try:
         return await asyncio.to_thread(_add)
     except Exception as e:
         logger.error(f"add_gemini_links error: {e}")
-        return 0, 0
+        return 0, 0, str(e)
 
 
 async def get_gemini_stats() -> dict:
