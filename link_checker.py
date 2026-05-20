@@ -153,7 +153,16 @@ async def check_links_batch(
     cookie_dead = False
 
     async with async_playwright() as pw:
-        launch_kwargs: dict = {"headless": True}
+        launch_kwargs: dict = {
+            "headless": True,
+            "args": [
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process",
+            ],
+        }
         sys_chrome = _system_chromium()
         if sys_chrome:
             launch_kwargs["executable_path"] = sys_chrome
